@@ -82,7 +82,7 @@ curl localhost:9867/tabs/$TAB/screenshot -o page.png
 # .navvi/personas/fry-dev.yml
 name: fry-dev
 description: Fry's developer persona
-email: ayuda.intro@gmail.com
+email: persona@example.com
 credentials: $BW_ENTRY_NAME
 services:
   - dev.to
@@ -105,12 +105,6 @@ Profiles live in `.navvi/profiles/`, mounted as a Docker volume. They persist ac
 - **Persistent sessions** — cookies survive restarts
 - **HTTP API** — framework-agnostic, works with any agent
 
-## Companion: Flowchad
-
-Navvi is the browser hands. [Flowchad](https://github.com/Fellowship-dev/flowchad) is the QA brain.
-
-Flowchad defines what to test. Navvi handles headed execution when headless won't cut it (CAPTCHAs, OAuth, stealth).
-
 ## License
 
-MIT
+Apache 2.0
