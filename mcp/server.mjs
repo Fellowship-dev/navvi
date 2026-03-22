@@ -34,6 +34,10 @@ const ACTION_LOG = path.join(os.tmpdir(), '.navvi-actions.jsonl');
 
 let pinchtabApi = process.env.PINCHTAB_API || `http://127.0.0.1:${PINCHTAB_PORT}`;
 let pinchtabToken = process.env.PINCHTAB_TOKEN || '';
+
+// Instance registry: persona → instanceId (set by navvi_up, used by all tools)
+const instanceRegistry = {};
+let activePersona = null; // last persona launched — used as default
 const pinchtabBin = process.env.PINCHTAB_BIN || which('pinchtab') || 'pinchtab';
 
 // Auto-read token from PinchTab config if not set
@@ -128,7 +132,11 @@ function apiCall(method, apiPath, body) {
     });
     req.on('error', reject);
     req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout')); });
-    if (body) req.write(JSON.stringify(body));
+    if (body) {
+      const payload = JSON.stringify(body);
+      req.setHeader('Content-Length', Buffer.byteLength(payload));
+      req.write(payload);
+    }
     req.end();
   });
 }
@@ -143,10 +151,23 @@ function isPinchtabReachable() {
   }
 }
 
-async function getFirstInstance() {
+async function getInstance(persona) {
+  // 1. Explicit persona → look up registry
+  if (persona && instanceRegistry[persona]) return instanceRegistry[persona];
+  // 2. Active persona (last launched) → look up registry
+  if (!persona && activePersona && instanceRegistry[activePersona]) return instanceRegistry[activePersona];
+  // 3. Fallback: first instance from PinchTab (backward compat)
   const instances = await apiCall('GET', '/instances');
   if (!Array.isArray(instances) || instances.length === 0) return null;
   return instances[0].id;
+}
+
+/** Get the bridge URL for a given instance (needed for screenshot/recording). */
+async function getInstanceUrl(instId) {
+  const instances = await apiCall('GET', '/instances');
+  if (!Array.isArray(instances)) return null;
+  const inst = instances.find((i) => i.id === instId);
+  return inst ? inst.url : null;
 }
 
 async function getFirstTab(instanceId) {
@@ -294,9 +315,9 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        persona: { type: 'string', description: 'Persona name (e.g. "fry-dev")' },
+        persona: { type: 'string', description: 'Persona name (e.g. "dev")' },
         mode: { type: 'string', enum: ['headed', 'headless'], default: 'headed' },
-        stealth: { type: 'string', enum: ['off', 'light', 'full'], description: 'Stealth level override. If omitted, reads from persona YAML (default: light).' },
+        stealth: { type: 'string', enum: ['off', 'light', 'full', 'maximum'], description: 'Stealth level override. If omitted, reads from persona YAML (default: light).' },
       },
       required: ['persona'],
     },
@@ -319,6 +340,7 @@ const TOOLS = [
       properties: {
         url: { type: 'string', description: 'URL to navigate to' },
         inspect: { type: 'boolean', default: true, description: 'Auto-inspect after load (default: true). Set false to skip.' },
+        persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
       },
       required: ['url'],
     },
@@ -326,7 +348,9 @@ const TOOLS = [
   {
     name: 'navvi_inspect',
     description: 'Get the accessibility tree of the current page (cheap — no image, just element refs). Saves a JSONL file to /tmp/navvi-snapshots/latest.jsonl. Grep it for roles like "combobox", "textbox", "button" to find interactive elements. Each node has a "ref" (e.g. "e42") you pass to navvi_click or navvi_fill. Prefer this over navvi_screenshot when you only need refs — it is much cheaper. You MUST call this before every navvi_click or navvi_fill — refs shift when the DOM changes, so always get fresh refs right before acting.',
-    inputSchema: { type: 'object', properties: {} },
+    inputSchema: { type: 'object', properties: {
+      persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
+    } },
   },
   {
     name: 'navvi_click',
@@ -337,6 +361,7 @@ const TOOLS = [
         ref: { type: 'string', description: 'Element ref from the LATEST navvi_inspect JSONL (e.g. "e42"). Omit when using x,y coordinates.' },
         x: { type: 'number', description: 'X coordinate to click (pixels from left). Use with y instead of ref for coordinate-based clicking.' },
         y: { type: 'number', description: 'Y coordinate to click (pixels from top). Use with x instead of ref for coordinate-based clicking.' },
+        persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
       },
     },
   },
@@ -349,6 +374,7 @@ const TOOLS = [
         ref: { type: 'string', description: 'Element ref from the LATEST navvi_inspect JSONL (e.g. "e15"). Grep /tmp/navvi-snapshots/latest.jsonl for role/name to find it.' },
         value: { type: 'string', description: 'Text to type into the input' },
         delay: { type: 'number', description: 'Delay in ms between each character (default: 25). Use 80-150 for natural typing speed during recordings.' },
+        persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
       },
       required: ['ref', 'value'],
     },
@@ -360,6 +386,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         key: { type: 'string', description: 'Key name to press (e.g. "Enter", "Tab", "Escape", "Backspace", "ArrowDown", "ArrowUp").' },
+        persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
       },
       required: ['key'],
     },
@@ -371,6 +398,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         describe: { type: 'boolean', default: true, description: 'Also run navvi_inspect and include page summary (default: true). Set false for image only.' },
+        persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
       },
     },
   },
@@ -382,6 +410,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         duration: { type: 'number', description: 'Max duration in seconds (default: 30, max: 120). Recording auto-stops after this.' },
+        persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
       },
     },
   },
@@ -536,6 +565,14 @@ async function handleTool(name, args) {
           status += '\n\nCould not list instances.';
         }
       }
+      // Show persona registry
+      const regEntries = Object.entries(instanceRegistry);
+      if (regEntries.length > 0) {
+        status += `\n\nPersona registry (active: ${activePersona || 'none'}):`;
+        for (const [name, id] of regEntries) {
+          status += `\n  ${name} → ${id}${name === activePersona ? ' ★' : ''}`;
+        }
+      }
       return status;
     }
 
@@ -564,7 +601,7 @@ async function handleTool(name, args) {
           const stealthMatch = yml.match(/^\s*stealth:\s*(.+)/m);
           if (stealthMatch) {
             const val = stealthMatch[1].trim().toLowerCase();
-            if (['off', 'light', 'full'].includes(val)) stealthLevel = val;
+            if (['off', 'light', 'full', 'maximum'].includes(val)) stealthLevel = val;
           }
         } catch {} // persona YAML missing — use PinchTab default
       }
@@ -577,7 +614,12 @@ async function handleTool(name, args) {
       if (stealthLevel) launchParams.stealthLevel = stealthLevel;
 
       const result = await apiCall('POST', '/instances/launch', launchParams);
-      let msg = `Instance launched: ${result.id || JSON.stringify(result)}`;
+      const instId = result.id || result.instanceId;
+      if (instId) {
+        instanceRegistry[persona] = instId;
+        activePersona = persona;
+      }
+      let msg = `Instance launched: ${instId || JSON.stringify(result)}`;
       if (stealthLevel) msg += ` (stealth: ${stealthLevel})`;
       return msg;
     }
@@ -592,11 +634,19 @@ async function handleTool(name, args) {
       for (const inst of toStop) {
         await apiCall('DELETE', `/instances/${inst.id}`);
       }
+      // Clean registry
+      if (args.persona) {
+        delete instanceRegistry[args.persona];
+        if (activePersona === args.persona) activePersona = null;
+      } else {
+        for (const key of Object.keys(instanceRegistry)) delete instanceRegistry[key];
+        activePersona = null;
+      }
       return `Stopped ${toStop.length} instance(s).`;
     }
 
     case 'navvi_open': {
-      const instId = await getFirstInstance();
+      const instId = await getInstance(args.persona);
       if (!instId) return 'Error: no running instance. Use navvi_up first.';
       const tabId = await getFirstTab(instId);
       if (!tabId) return 'Error: no open tab.';
@@ -621,7 +671,7 @@ async function handleTool(name, args) {
     }
 
     case 'navvi_inspect': {
-      const instId = await getFirstInstance();
+      const instId = await getInstance(args.persona);
       if (!instId) return 'Error: no running instance.';
       const tabId = await getFirstTab(instId);
       if (!tabId) return 'Error: no open tab.';
@@ -631,7 +681,7 @@ async function handleTool(name, args) {
     }
 
     case 'navvi_click': {
-      const instId = await getFirstInstance();
+      const instId = await getInstance(args.persona);
       if (!instId) return 'Error: no running instance.';
       const tabId = await getFirstTab(instId);
       if (!tabId) return 'Error: no open tab.';
@@ -647,7 +697,7 @@ async function handleTool(name, args) {
     }
 
     case 'navvi_fill': {
-      const instId = await getFirstInstance();
+      const instId = await getInstance(args.persona);
       if (!instId) return 'Error: no running instance.';
       const tabId = await getFirstTab(instId);
       if (!tabId) return 'Error: no open tab.';
@@ -729,7 +779,7 @@ async function handleTool(name, args) {
     }
 
     case 'navvi_press': {
-      const instId = await getFirstInstance();
+      const instId = await getInstance(args.persona);
       if (!instId) return 'Error: no running instance.';
       const tabId = await getFirstTab(instId);
       if (!tabId) return 'Error: no open tab.';
@@ -739,14 +789,15 @@ async function handleTool(name, args) {
     }
 
     case 'navvi_screenshot': {
-      const instId = await getFirstInstance();
+      const instId = await getInstance(args.persona);
       if (!instId) return 'Error: no running instance.';
       const tabId = await getFirstTab(instId);
       if (!tabId) return 'Error: no open tab.';
 
-      // Save screenshot to /tmp — use PinchTab's screenshot endpoint with tabId param
+      // Save screenshot to /tmp — hit bridge URL directly (server can't see child instance tabs)
+      const instUrl = await getInstanceUrl(instId) || pinchtabApi;
       const filepath = await new Promise((resolve, reject) => {
-        const url = new URL(`/screenshot?tabId=${tabId}&quality=80&raw=true`, pinchtabApi);
+        const url = new URL(`/screenshot?tabId=${tabId}&quality=80&raw=true`, instUrl);
         const opts = { headers: pinchtabToken ? { 'Authorization': `Bearer ${pinchtabToken}` } : {} };
         http.get(url, opts, (res) => {
           const chunks = [];
@@ -792,7 +843,7 @@ async function handleTool(name, args) {
     case 'navvi_record_start': {
       if (!isPinchtabReachable()) return 'Error: PinchTab not reachable. Use navvi_start first.';
 
-      const instId = await getFirstInstance();
+      const instId = await getInstance(args.persona);
       if (!instId) return 'Error: no running browser instance. Use navvi_up first.';
       const tabId = await getFirstTab(instId);
       if (!tabId) return 'Error: no open tab.';
@@ -819,14 +870,15 @@ async function handleTool(name, args) {
       // Clear action log for fresh recording
       try { fs.unlinkSync(ACTION_LOG); } catch {}
 
-      // Capture loop: PinchTab screenshots via HTTP API
+      // Capture loop: hit bridge URL directly (server can't see child instance tabs)
+      const recordInstUrl = await getInstanceUrl(instId) || pinchtabApi;
       const captureScript = `
 const http = require('http');
 const fs = require('fs');
 const framesDir = ${JSON.stringify(framesDir)};
 const stateFile = ${JSON.stringify(stateFile)};
 const tabId = ${JSON.stringify(tabId)};
-const api = ${JSON.stringify(pinchtabApi)};
+const api = ${JSON.stringify(recordInstUrl)};
 const token = ${JSON.stringify(pinchtabToken)};
 const fps = ${fps};
 const maxFrames = ${duration} * fps;

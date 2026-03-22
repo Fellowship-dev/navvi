@@ -26,10 +26,10 @@ Each persona lives in `.navvi/personas/<name>.yml`. One file per identity.
 ## Example
 
 ```yaml
-# .navvi/personas/fry-dev.yml
-name: fry-dev
-description: Fry's developer persona for blogging and community
-email: ayuda.intro@gmail.com
+# .navvi/personas/dev.yml
+name: dev
+description: Developer persona for blogging and community
+email: persona@example.com
 credentials: $BW_GOOGLE_AYUDA
 services:
   - dev.to

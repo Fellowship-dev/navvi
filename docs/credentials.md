@@ -9,7 +9,7 @@ Navvi uses [gopass](https://github.com/gopasspw/gopass) for credential storage. 
 ```bash
 gpg --full-generate-key
 # Choose: RSA, 4096 bits, no expiration
-# Use your persona email (e.g. ayuda.intro@gmail.com)
+# Use your persona email
 ```
 
 ### 2. Export the private key
@@ -35,7 +35,7 @@ On Codespace creation, `setup.sh` imports the GPG key and initializes gopass aut
 
 ```bash
 # Add a service credential
-gopass insert navvi/fry-dev/devto
+gopass insert navvi/dev/devto
 ```
 
 Use the multiline format (first line = password, then key-value pairs):
@@ -51,13 +51,13 @@ totp: otpauth://totp/dev.to:fry?secret=JBSWY3DPEHPK3PXP
 
 ```bash
 # List all credentials for a persona
-./scripts/navvi.sh creds fry-dev
+./scripts/navvi.sh creds dev
 
 # Show specific service
-./scripts/navvi.sh creds fry-dev devto
+./scripts/navvi.sh creds dev devto
 
 # Get credentials for auto-login (writes JSON to temp file)
-./scripts/navvi.sh login fry-dev devto
+./scripts/navvi.sh login dev devto
 ```
 
 ## TOTP / 2FA
@@ -66,11 +66,11 @@ gopass has built-in OTP support. Store the `totp:` URI in the credential entry:
 
 ```bash
 # Add TOTP seed
-gopass insert navvi/fry-dev/devto
+gopass insert navvi/dev/devto
 # Include: totp: otpauth://totp/...
 
 # Generate current code
-gopass otp navvi/fry-dev/devto
+gopass otp navvi/dev/devto
 ```
 
 ## Gopass Store Structure
@@ -78,7 +78,7 @@ gopass otp navvi/fry-dev/devto
 ```
 ~/.local/share/gopass/stores/root/
 └── navvi/
-    ├── fry-dev/
+    ├── dev/
     │   ├── devto.age
     │   ├── github.age
     │   └── lobsters.age

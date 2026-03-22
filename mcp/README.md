@@ -55,7 +55,7 @@ If dependencies are missing, `navvi_start` tells you exactly what to install.
 
 ```
 navvi_start(mode: "local")     # or "remote"
-navvi_up(persona: "fry-dev")   # launch browser
+navvi_up(persona: "dev")   # launch browser
 navvi_open(url: "https://...")  # navigate
 navvi_snapshot()                # read the page
 navvi_stop()                   # done

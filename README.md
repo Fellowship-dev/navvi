@@ -27,16 +27,16 @@ Real websites with isTrusted events
 
 ```bash
 # Via PinchTab (recommended — stealth + accessibility tree)
-./scripts/launch-pinchtab.sh fry-dev --headed
+./scripts/launch-pinchtab.sh dev --headed
 
 # Or use the CLI wrapper
-./scripts/navvi.sh launch fry-dev --headed
+./scripts/navvi.sh launch dev --headed
 ./scripts/navvi.sh open https://dev.to
 ./scripts/navvi.sh snapshot    # 800 tokens, not 10K
 ./scripts/navvi.sh screenshot  # full page PNG
 
 # Direct Chrome (fallback — raw CDP, no stealth)
-./scripts/launch-chrome.sh fry-dev
+./scripts/launch-chrome.sh dev
 ```
 
 ## Structure
@@ -59,7 +59,7 @@ PinchTab runs on port 9867 and provides:
 ```bash
 # Launch a browser instance
 curl -X POST localhost:9867/instances/launch \
-  -d '{"name":"fry-dev","mode":"headed"}'
+  -d '{"name":"dev","mode":"headed"}'
 
 # Open a URL
 curl -X POST localhost:9867/instances/$ID/tabs/open \
@@ -79,9 +79,9 @@ curl localhost:9867/tabs/$TAB/screenshot -o page.png
 ## Persona Definition
 
 ```yaml
-# .navvi/personas/fry-dev.yml
-name: fry-dev
-description: Fry's developer persona
+# .navvi/personas/dev.yml
+name: dev
+description: Developer persona
 email: persona@example.com
 credentials: $BW_ENTRY_NAME
 services:
