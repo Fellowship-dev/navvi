@@ -1,4 +1,4 @@
-FROM ubuntu:22.04
+FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV DISPLAY=:1
@@ -14,9 +14,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     x11vnc \
     python3 \
     python3-pip \
+    python3-venv \
     wget \
     unzip \
     procps \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # noVNC (web-based VNC client)
@@ -27,11 +29,11 @@ RUN wget -q https://github.com/novnc/noVNC/archive/refs/tags/v1.4.0.tar.gz -O /t
     && rm /tmp/novnc.tar.gz
 
 # websockify (noVNC needs it to proxy VNC)
-RUN pip3 install --no-cache-dir websockify
+RUN pip3 install --no-cache-dir --break-system-packages websockify
 
 # Python dependencies
 COPY requirements.txt /opt/navvi/requirements.txt
-RUN pip3 install --no-cache-dir -r /opt/navvi/requirements.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r /opt/navvi/requirements.txt
 
 # Application code
 COPY navvi-server.py /opt/navvi/navvi-server.py
