@@ -1,109 +1,102 @@
-# Navvi
+# Navvi v2
 
-Agentic browser persona manager. Each persona is a persistent browser identity with its own cookies, credentials, and profile — running in a Codespace with headed Chrome.
+Give your AI agent a real browser identity.
 
-Spin up per task. Tear down when done.
+Persistent browser personas powered by Xvfb + Firefox + xdotool. OS-level input produces `isTrusted: true` events — undetectable by bot detection. Firefox profiles persist across sessions via Docker volumes.
 
-## How It Works
+## Architecture
 
 ```
-Claude Code (brain)
-    ↓
-Navvi (persona + browser orchestration)
-    ↓
-PinchTab (HTTP API, stealth, accessibility tree)
-    ↓
-Headed Chrome in Codespace (VNC + CDP)
-    ↓
-Real websites with isTrusted events
+MCP server (server.mjs, Node.js)
+  ↓ HTTP calls to localhost:8024
+Docker container
+  ├── Xvfb :1 (virtual display, 1024x768)
+  ├── Firefox ESR (--marionette, persistent profile)
+  ├── navvi-server.py (FastAPI on :8024)
+  │   ├── xdotool (click, type, mousedown/up, drag)
+  │   ├── scrot (screenshots)
+  │   └── marionette.py (navigate, getURL, getTitle, executeJS)
+  ├── x11vnc + noVNC (:6080, live view)
+  └── Volume: /home/user/.mozilla (persistent Firefox profile)
 ```
 
 ## Quick Start
 
-1. Create a Codespace from this repo
-2. PinchTab + Chromium install automatically
-3. Define personas in `.navvi/personas/*.yml`
-4. Launch:
-
 ```bash
-# Via PinchTab (recommended — stealth + accessibility tree)
-./scripts/launch-pinchtab.sh dev --headed
+# Build the Docker image
+docker build -t navvi container/
 
-# Or use the CLI wrapper
-./scripts/navvi.sh launch dev --headed
-./scripts/navvi.sh open https://dev.to
-./scripts/navvi.sh snapshot    # 800 tokens, not 10K
-./scripts/navvi.sh screenshot  # full page PNG
+# Start a persona
+./scripts/navvi.sh start default
 
-# Direct Chrome (fallback — raw CDP, no stealth)
-./scripts/launch-chrome.sh dev
+# Or via MCP tools
+# navvi_start persona=default mode=local
+# navvi_open url=https://example.com
+# navvi_screenshot
 ```
 
 ## Structure
 
 ```
-.devcontainer/           # Codespace config (desktop-lite + Chromium + PinchTab)
-.navvi/
-├── personas/            # Persona definitions (YAML, committed)
-└── profiles/            # Browser profiles with cookies (volume-mounted)
+container/
+├── Dockerfile           # Ubuntu + Firefox + Xvfb + xdotool + FastAPI
+├── start.sh             # Entrypoint: start all services
+├── navvi-server.py      # REST API for automation
+├── marionette.py        # Firefox Marionette TCP client
+└── requirements.txt     # fastapi, uvicorn
+mcp/
+├── server.mjs           # MCP server (Docker lifecycle + tool handlers)
+└── mcp.json             # MCP config
+personas/
+└── default.yaml         # Template persona
 scripts/
-├── navvi.sh             # CLI wrapper for PinchTab API
-├── launch-pinchtab.sh   # Launch PinchTab server for a persona
-└── launch-chrome.sh     # Launch raw Chrome with CDP (fallback)
+└── navvi.sh             # CLI wrapper
+.devcontainer/
+└── devcontainer.json    # Codespace config
 ```
 
-## PinchTab API
+## API Endpoints (navvi-server.py)
 
-PinchTab runs on port 9867 and provides:
+| Endpoint | Method | Backend |
+|---|---|---|
+| `/health` | GET | Check Firefox + Xvfb alive |
+| `/navigate` | POST `{url}` | Marionette |
+| `/url` | GET | Marionette |
+| `/title` | GET | Marionette |
+| `/click` | POST `{x, y}` | xdotool |
+| `/type` | POST `{text, delay}` | xdotool |
+| `/key` | POST `{key}` | xdotool |
+| `/mousedown` | POST `{x, y}` | xdotool |
+| `/mouseup` | POST `{x, y}` | xdotool |
+| `/mousemove` | POST `{x, y}` | xdotool |
+| `/drag` | POST `{x1, y1, x2, y2}` | xdotool |
+| `/scroll` | POST `{direction, amount}` | xdotool |
+| `/screenshot` | GET | scrot → base64 PNG |
+| `/cursor` | GET | xdotool |
+| `/execute` | POST `{script}` | Marionette |
 
-```bash
-# Launch a browser instance
-curl -X POST localhost:9867/instances/launch \
-  -d '{"name":"dev","mode":"headed"}'
+## MCP Tools (19 total)
 
-# Open a URL
-curl -X POST localhost:9867/instances/$ID/tabs/open \
-  -d '{"url":"https://dev.to"}'
+**Lifecycle:** `navvi_start`, `navvi_stop`, `navvi_status`, `navvi_list`
 
-# Get accessibility tree (800 tokens vs 10K for screenshots)
-curl localhost:9867/tabs/$TAB/snapshot
+**Browser:** `navvi_open`, `navvi_click`, `navvi_fill`, `navvi_press`, `navvi_drag`, `navvi_mousedown`, `navvi_mouseup`, `navvi_mousemove`, `navvi_scroll`, `navvi_screenshot`, `navvi_url`, `navvi_vnc`
 
-# Perform action by element ref
-curl -X POST localhost:9867/tabs/$TAB/action \
-  -d '{"type":"click","ref":"e42"}'
+**Recording:** `navvi_record_start`, `navvi_record_stop`, `navvi_record_gif`
 
-# Screenshot
-curl localhost:9867/tabs/$TAB/screenshot -o page.png
-```
+## Persona Persistence
 
-## Persona Definition
+Firefox profiles are stored in Docker named volumes (`navvi-profile-<persona>`). Stop and restart a container — cookies, logins, and browsing history are preserved.
 
-```yaml
-# .navvi/personas/dev.yml
-name: dev
-description: Developer persona
-email: persona@example.com
-credentials: $BW_ENTRY_NAME
-services:
-  - dev.to
-  - github.com
-browser:
-  stealth: true
-  locale: en-US
-  timezone: America/Santiago
-```
+First-time login: use `navvi_vnc` to get the noVNC URL, log in manually via the browser, then the session persists.
 
-## Profile Persistence
+## Why v2?
 
-Profiles live in `.navvi/profiles/`, mounted as a Docker volume. They persist across Codespace rebuilds automatically — no backup/restore needed.
+v1 used PinchTab (Chrome/CDP). CDP is detectable — bot detection scripts check for `navigator.webdriver`, CDP protocol markers, and `isTrusted: false` events. v2 replaces all of this with:
 
-## Why PinchTab + Headed Chrome?
-
-- **Stealth** — patches `navigator.webdriver`, spoofs UA, hides automation
-- **Accessibility tree** — 800 tokens to read a page (5-13x cheaper than screenshots)
-- **isTrusted events** — passes CAPTCHA detection via VNC
-- **Persistent sessions** — cookies survive restarts
-- **HTTP API** — framework-agnostic, works with any agent
+- **Firefox** instead of Chrome (no CDP detection vectors)
+- **xdotool** for all input (OS-level events, `isTrusted: true`)
+- **Marionette** for navigation only (no input, no detection surface)
+- **scrot** for screenshots (X11-level capture)
 
 ## License
 

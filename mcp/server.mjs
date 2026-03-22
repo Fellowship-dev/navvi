@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 /**
- * Navvi MCP Server v0.5.0 — local + remote browser automation.
+ * Navvi MCP Server v2.0.0 — persistent browser personas via Docker containers.
  *
  * Lifecycle:
  *   navvi_start (local|remote), navvi_stop, navvi_status, navvi_list
  *
- * Browser control (PinchTab):
- *   navvi_up, navvi_down, navvi_open, navvi_inspect,
- *   navvi_click, navvi_fill, navvi_drag, navvi_mousedown, navvi_mouseup, navvi_mousemove,
- *   navvi_press, navvi_screenshot
+ * Browser control (xdotool + Marionette via navvi-server.py):
+ *   navvi_open, navvi_click, navvi_fill, navvi_press,
+ *   navvi_drag, navvi_mousedown, navvi_mouseup, navvi_mousemove,
+ *   navvi_scroll, navvi_screenshot, navvi_url, navvi_vnc
  *
  * Video recording:
  *   navvi_record_start, navvi_record_stop, navvi_record_gif
@@ -22,33 +22,25 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
+// --- Constants ---
+
 const REPO = process.env.NAVVI_REPO || 'Fellowship-dev/navvi';
 const MACHINE_TYPE = process.env.NAVVI_MACHINE || 'basicLinux32gb';
-const PINCHTAB_PORT = 9867;
+const NAVVI_PORT = 8024;
+const VNC_PORT = 6080;
+const DOCKER_IMAGE = process.env.NAVVI_IMAGE || 'navvi';
+const CONTAINER_PREFIX = 'navvi-';
+
 const PIDFILE_FWD = path.join(os.tmpdir(), '.navvi-port-forward.pid');
-const PIDFILE_LOCAL = path.join(os.tmpdir(), '.navvi-pinchtab-local.pid');
 const PIDFILE_RECORD = path.join(os.tmpdir(), '.navvi-ffmpeg.pid');
 const STATEFILE = path.join(os.tmpdir(), '.navvi-mode');
 const RECORDINGS_DIR = path.join(os.tmpdir(), 'navvi-recordings');
-const SNAPSHOT_DIR = path.join(os.tmpdir(), 'navvi-snapshots');
 const ACTION_LOG = path.join(os.tmpdir(), '.navvi-actions.jsonl');
 
-let pinchtabApi = process.env.PINCHTAB_API || `http://127.0.0.1:${PINCHTAB_PORT}`;
-let pinchtabToken = process.env.PINCHTAB_TOKEN || '';
+let navviApi = `http://127.0.0.1:${NAVVI_PORT}`;
 
-// Instance registry: persona → instanceId (set by navvi_up, used by all tools)
-const instanceRegistry = {};
-let activePersona = null; // last persona launched — used as default
-const pinchtabBin = process.env.PINCHTAB_BIN || which('pinchtab') || 'pinchtab';
-
-// Auto-read token from PinchTab config if not set
-if (!pinchtabToken) {
-  const configPath = path.join(os.homedir(), 'Library', 'Application Support', 'pinchtab', 'config.json');
-  try {
-    const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    if (cfg.server && cfg.server.token) pinchtabToken = cfg.server.token;
-  } catch {}
-}
+// Track active persona for default targeting
+let activePersona = null;
 
 // --- Helpers ---
 
@@ -58,7 +50,7 @@ function logAction(action, detail) {
   try {
     const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
     if (!state.active) return;
-  } catch { return; } // no active recording
+  } catch { return; }
   const entry = JSON.stringify({ ts: Date.now(), action, detail });
   fs.appendFileSync(ACTION_LOG, entry + '\n');
 }
@@ -100,19 +92,60 @@ function clearMode() {
   try { fs.unlinkSync(STATEFILE); } catch {}
 }
 
-function apiCall(method, apiPath, body) {
+/** Get the container name for a persona */
+function containerName(persona) {
+  return `${CONTAINER_PREFIX}${persona}`;
+}
+
+/** Get assigned ports for a persona based on container inspect */
+function getContainerPorts(persona) {
+  try {
+    const name = containerName(persona);
+    const info = sh(`docker inspect --format '{{json .NetworkSettings.Ports}}' ${name} 2>/dev/null`);
+    const ports = JSON.parse(info);
+    const apiPort = ports['8024/tcp']?.[0]?.HostPort || NAVVI_PORT;
+    const vncPort = ports['6080/tcp']?.[0]?.HostPort || VNC_PORT;
+    return { api: parseInt(apiPort), vnc: parseInt(vncPort) };
+  } catch {
+    return { api: NAVVI_PORT, vnc: VNC_PORT };
+  }
+}
+
+/** Read persona YAML file (simple line parser, no deps) */
+function readPersonaYaml(persona) {
+  const dirs = [
+    path.join(process.cwd(), 'personas'),
+    path.join(process.cwd(), '.navvi', 'personas'),
+  ];
+  for (const dir of dirs) {
+    for (const ext of ['.yaml', '.yml']) {
+      const filepath = path.join(dir, persona + ext);
+      try {
+        const text = fs.readFileSync(filepath, 'utf8');
+        const result = {};
+        for (const line of text.split('\n')) {
+          const match = line.match(/^\s{0,2}(\w+):\s*(.+)/);
+          if (match) result[match[1]] = match[2].trim();
+        }
+        return result;
+      } catch {}
+    }
+  }
+  return {};
+}
+
+/** HTTP call to navvi-server.py API */
+function apiCall(method, apiPath, body, apiBase) {
   return new Promise((resolve, reject) => {
-    const url = new URL(apiPath, pinchtabApi);
+    const base = apiBase || navviApi;
+    const url = new URL(apiPath, base);
     const options = {
       hostname: url.hostname,
       port: url.port,
-      path: url.pathname,
+      path: url.pathname + url.search,
       method,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(pinchtabToken ? { 'Authorization': `Bearer ${pinchtabToken}` } : {}),
-      },
-      timeout: 10000,
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 15000,
     };
     const req = http.request(options, (res) => {
       let data = '';
@@ -120,13 +153,9 @@ function apiCall(method, apiPath, body) {
       res.on('end', () => {
         let parsed;
         try { parsed = JSON.parse(data); } catch { parsed = data; }
-        // Surface PinchTab errors instead of silently resolving
         if (res.statusCode >= 400) {
-          const errMsg = (parsed && parsed.error) || (parsed && parsed.message) || data || `HTTP ${res.statusCode}`;
-          return reject(new Error(`PinchTab ${method} ${apiPath} failed (${res.statusCode}): ${errMsg}`));
-        }
-        if (parsed && typeof parsed === 'object' && parsed.error && !parsed.ok) {
-          return reject(new Error(`PinchTab ${method} ${apiPath}: ${parsed.error}`));
+          const errMsg = (parsed && parsed.detail) || (parsed && parsed.error) || data || `HTTP ${res.statusCode}`;
+          return reject(new Error(`API ${method} ${apiPath} failed (${res.statusCode}): ${errMsg}`));
         }
         resolve(parsed);
       });
@@ -142,121 +171,53 @@ function apiCall(method, apiPath, body) {
   });
 }
 
-function isPinchtabReachable() {
+/** Check if navvi-server is reachable */
+function isApiReachable(port) {
   try {
-    const tokenHeader = pinchtabToken ? `-H "Authorization: Bearer ${pinchtabToken}"` : '';
-    const result = sh(`curl -sf -o /dev/null -w '%{http_code}' ${tokenHeader} ${pinchtabApi}/instances 2>/dev/null`);
+    const result = sh(`curl -sf -o /dev/null -w '%{http_code}' http://127.0.0.1:${port || NAVVI_PORT}/health 2>/dev/null`);
     return result === '200';
   } catch {
     return false;
   }
 }
 
-async function getInstance(persona) {
-  // 1. Explicit persona → look up registry
-  if (persona && instanceRegistry[persona]) return instanceRegistry[persona];
-  // 2. Active persona (last launched) → look up registry
-  if (!persona && activePersona && instanceRegistry[activePersona]) return instanceRegistry[activePersona];
-  // 3. Fallback: first instance from PinchTab (backward compat)
-  const instances = await apiCall('GET', '/instances');
-  if (!Array.isArray(instances) || instances.length === 0) return null;
-  return instances[0].id;
-}
-
-/** Get the bridge URL for a given instance (needed for screenshot/recording). */
-async function getInstanceUrl(instId) {
-  const instances = await apiCall('GET', '/instances');
-  if (!Array.isArray(instances)) return null;
-  const inst = instances.find((i) => i.id === instId);
-  return inst ? inst.url : null;
-}
-
-async function getFirstTab(instanceId) {
-  const tabs = await apiCall('GET', `/instances/${instanceId}/tabs`);
-  if (!Array.isArray(tabs) || tabs.length === 0) return null;
-  return tabs[0].id;
-}
-
-// Snap + save JSONL so agents have fresh refs.
-// Returns { path, count, title, url } from the saved snapshot.
-async function autoInspect(tabId) {
-  const snapshot = await apiCall('GET', `/tabs/${tabId}/snapshot`);
-  return saveSnapshotToFile(snapshot);
-}
-
-
-
-// Save snapshot to a timestamped JSONL file and symlink latest.jsonl to it.
-// Agents grep /tmp/navvi-snapshots/latest.jsonl for refs; timestamped files
-// stay around for debugging and replaying interaction sequences.
-function saveSnapshotToFile(snapshot) {
-  if (!fs.existsSync(SNAPSHOT_DIR)) fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
-
-  const data = typeof snapshot === 'string' ? JSON.parse(snapshot) : snapshot;
-  const nodes = data.nodes || [];
-  const title = data.title || '';
-  const url = data.url || '';
-  const ts = Date.now();
-
-  // Write timestamped file
-  const tsFile = path.join(SNAPSHOT_DIR, `inspect-${ts}.jsonl`);
-  const lines = [`{"_meta":{"title":${JSON.stringify(title)},"url":${JSON.stringify(url)},"count":${nodes.length},"ts":${ts}}}`];
-  for (const n of nodes) {
-    lines.push(JSON.stringify(n));
+/** List running navvi containers */
+function listContainers() {
+  try {
+    const output = sh(`docker ps --filter "name=${CONTAINER_PREFIX}" --format '{{json .}}' 2>/dev/null`);
+    if (!output) return [];
+    return output.split('\n').filter(Boolean).map(line => {
+      const c = JSON.parse(line);
+      return {
+        name: c.Names.replace(CONTAINER_PREFIX, ''),
+        id: c.ID,
+        state: c.State,
+        ports: c.Ports,
+        image: c.Image,
+      };
+    });
+  } catch {
+    return [];
   }
-  fs.writeFileSync(tsFile, lines.join('\n') + '\n');
-
-  // Symlink latest → timestamped file
-  const latestPath = path.join(SNAPSHOT_DIR, 'latest.jsonl');
-  try { fs.unlinkSync(latestPath); } catch {}
-  fs.symlinkSync(tsFile, latestPath);
-
-  return { path: latestPath, count: nodes.length, title, url };
 }
 
 // --- Dependency checks ---
 
 function checkLocalDeps() {
   const missing = [];
-
-  // Check PinchTab (respects PINCHTAB_BIN env var)
-  const pt = which(pinchtabBin);
-  if (!pt) {
+  if (!which('docker')) {
     missing.push({
-      name: 'PinchTab',
-      install: [
-        'curl -fsSL https://pinchtab.com/install.sh | bash',
-        'curl -fsSL https://github.com/pinchtab/pinchtab/releases/latest/download/pinchtab-darwin-$(uname -m | sed s/x86_64/amd64/) -o /usr/local/bin/pinchtab && chmod +x /usr/local/bin/pinchtab',
-      ],
+      name: 'Docker',
+      install: ['brew install --cask docker'],
     });
   }
-
-  // Check Chrome or Chromium
-  const chromePaths = [
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    '/Applications/Chromium.app/Contents/MacOS/Chromium',
-  ];
-  const hasChrome = chromePaths.some((p) => fs.existsSync(p)) || which('chromium') || which('google-chrome');
-  if (!hasChrome) {
-    missing.push({
-      name: 'Chrome or Chromium',
-      install: [
-        'brew install --cask google-chrome',
-        'brew install --cask chromium',
-      ],
-    });
-  }
-
   return missing;
 }
 
 function checkRemoteDeps() {
   const missing = [];
   if (!which('gh')) {
-    missing.push({
-      name: 'GitHub CLI (gh)',
-      install: ['brew install gh'],
-    });
+    missing.push({ name: 'GitHub CLI (gh)', install: ['brew install gh'] });
   }
   return missing;
 }
@@ -264,10 +225,8 @@ function checkRemoteDeps() {
 function formatMissing(missing) {
   let msg = 'Missing dependencies:\n\n';
   for (const dep of missing) {
-    msg += `${dep.name} — install with any of:\n`;
-    for (const cmd of dep.install) {
-      msg += `  $ ${cmd}\n`;
-    }
+    msg += `${dep.name} — install with:\n`;
+    for (const cmd of dep.install) msg += `  $ ${cmd}\n`;
     msg += '\n';
   }
   msg += 'Install the missing dependencies and try again.';
@@ -279,53 +238,19 @@ function formatMissing(missing) {
 const TOOLS = [
   {
     name: 'navvi_start',
-    description: 'Start Navvi in local or remote mode. Local runs PinchTab directly on your machine. Remote spins up a GitHub Codespace and port-forwards PinchTab.',
+    description: 'Start a Navvi browser container for a persona. Local mode runs Docker on your machine. Remote spins up a GitHub Codespace.',
     inputSchema: {
       type: 'object',
       properties: {
-        mode: { type: 'string', enum: ['local', 'remote'], description: 'Run locally or in a Codespace' },
+        persona: { type: 'string', description: 'Persona name (default: "default"). Maps to personas/<name>.yaml and a persistent Docker volume.' },
+        mode: { type: 'string', enum: ['local', 'remote'], description: 'Run locally via Docker or in a Codespace (default: local)' },
         name: { type: 'string', description: 'Codespace name to resume (remote mode only, optional)' },
       },
-      required: ['mode'],
     },
   },
   {
     name: 'navvi_stop',
-    description: 'Stop Navvi — kills local PinchTab or stops Codespace + port forward.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        name: { type: 'string', description: 'Codespace name (remote mode, optional — stops first running if omitted)' },
-      },
-    },
-  },
-  {
-    name: 'navvi_status',
-    description: 'Show current Navvi state — mode (local/remote/off), PinchTab reachability, running browser instances.',
-    inputSchema: { type: 'object', properties: {} },
-  },
-  {
-    name: 'navvi_list',
-    description: 'List available Codespaces for Navvi (remote mode).',
-    inputSchema: { type: 'object', properties: {} },
-  },
-  // Browser control (PinchTab)
-  {
-    name: 'navvi_up',
-    description: 'Launch a browser instance for a persona. Requires navvi_start first.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        persona: { type: 'string', description: 'Persona name (e.g. "dev")' },
-        mode: { type: 'string', enum: ['headed', 'headless'], default: 'headed' },
-        stealth: { type: 'string', enum: ['off', 'light', 'full', 'maximum'], description: 'Stealth level override. If omitted, reads from persona YAML (default: light).' },
-      },
-      required: ['persona'],
-    },
-  },
-  {
-    name: 'navvi_down',
-    description: 'Stop a browser instance. Stops all if no persona specified.',
+    description: 'Stop a Navvi container. Stops all if no persona specified. Firefox profile is preserved in the Docker volume.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -334,161 +259,194 @@ const TOOLS = [
     },
   },
   {
+    name: 'navvi_status',
+    description: 'Show current Navvi state — running containers, API health, active persona.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'navvi_list',
+    description: 'List available Codespaces for Navvi (remote mode).',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'navvi_open',
-    description: 'Open a URL in the active browser instance. Auto-inspects the page after load and returns the JSONL path with element refs. Grep the JSONL for roles like "combobox", "textbox", or "button" to find interactive elements before calling navvi_click or navvi_fill.',
+    description: 'Navigate to a URL in the active browser. Uses Firefox Marionette for reliable navigation.',
     inputSchema: {
       type: 'object',
       properties: {
         url: { type: 'string', description: 'URL to navigate to' },
-        inspect: { type: 'boolean', default: true, description: 'Auto-inspect after load (default: true). Set false to skip.' },
-        persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
+        persona: { type: 'string', description: 'Target persona (optional — uses active if omitted)' },
       },
       required: ['url'],
     },
   },
   {
-    name: 'navvi_inspect',
-    description: 'Get the accessibility tree of the current page (cheap — no image, just element refs). Saves a JSONL file to /tmp/navvi-snapshots/latest.jsonl. Grep it for roles like "combobox", "textbox", "button" to find interactive elements. Each node has a "ref" (e.g. "e42") you pass to navvi_click or navvi_fill. Prefer this over navvi_screenshot when you only need refs — it is much cheaper. You MUST call this before every navvi_click or navvi_fill — refs shift when the DOM changes, so always get fresh refs right before acting.',
-    inputSchema: { type: 'object', properties: {
-      persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
-    } },
-  },
-  {
     name: 'navvi_click',
-    description: 'Click an element by its accessibility tree ref OR by x,y coordinates. Use ref for normal DOM elements. Use x,y for elements not in the accessibility tree (CAPTCHAs, canvas, iframes). When using coordinates, take a navvi_screenshot first to identify the target position. IMPORTANT: refs shift when the DOM changes — always call navvi_inspect immediately before clicking by ref.',
+    description: 'Click at (x, y) coordinates using OS-level xdotool input (isTrusted: true). Take a navvi_screenshot first to identify the target position.',
     inputSchema: {
       type: 'object',
       properties: {
-        ref: { type: 'string', description: 'Element ref from the LATEST navvi_inspect JSONL (e.g. "e42"). Omit when using x,y coordinates.' },
-        x: { type: 'number', description: 'X coordinate to click (pixels from left). Use with y instead of ref for coordinate-based clicking.' },
-        y: { type: 'number', description: 'Y coordinate to click (pixels from top). Use with x instead of ref for coordinate-based clicking.' },
-        persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
+        x: { type: 'number', description: 'X coordinate (pixels from left)' },
+        y: { type: 'number', description: 'Y coordinate (pixels from top)' },
+        persona: { type: 'string', description: 'Target persona (optional)' },
       },
+      required: ['x', 'y'],
     },
   },
   {
     name: 'navvi_fill',
-    description: 'Type text into an input field using keystroke events (fires JS input/change listeners). Verifies after typing that the value was actually entered. If verification fails, you will get a WARNING — retry with navvi_click first, then navvi_fill again. Call navvi_inspect before this to get fresh refs.',
+    description: 'Click at (x, y) then type text using OS-level xdotool input. Types character by character with configurable delay.',
     inputSchema: {
       type: 'object',
       properties: {
-        ref: { type: 'string', description: 'Element ref from the LATEST navvi_inspect JSONL (e.g. "e15"). Grep /tmp/navvi-snapshots/latest.jsonl for role/name to find it.' },
-        value: { type: 'string', description: 'Text to type into the input' },
-        delay: { type: 'number', description: 'Delay in ms between each character (default: 25). Use 80-150 for natural typing speed during recordings.' },
-        persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
+        x: { type: 'number', description: 'X coordinate of the input field' },
+        y: { type: 'number', description: 'Y coordinate of the input field' },
+        value: { type: 'string', description: 'Text to type' },
+        delay: { type: 'number', description: 'Delay in ms between characters (default: 12). Use 50-100 for natural typing speed.' },
+        persona: { type: 'string', description: 'Target persona (optional)' },
       },
-      required: ['ref', 'value'],
+      required: ['x', 'y', 'value'],
     },
   },
   {
     name: 'navvi_press',
-    description: 'Press a keyboard key (Enter, Tab, Escape, Backspace, ArrowDown, etc.). Use after navvi_fill to submit a form (e.g. press Enter to search). No ref needed — sends the key to the currently focused element.',
+    description: 'Press a keyboard key (Enter, Tab, Escape, Backspace, ArrowDown, etc.). Sends to currently focused element.',
     inputSchema: {
       type: 'object',
       properties: {
-        key: { type: 'string', description: 'Key name to press (e.g. "Enter", "Tab", "Escape", "Backspace", "ArrowDown", "ArrowUp").' },
-        persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
+        key: { type: 'string', description: 'Key name (e.g. "Enter", "Tab", "Escape", "Backspace", "ArrowDown")' },
+        persona: { type: 'string', description: 'Target persona (optional)' },
       },
       required: ['key'],
     },
   },
   {
     name: 'navvi_drag',
-    description: 'Drag an element or coordinate by (dx, dy) pixels. Supports ref OR x,y as the drag origin. Three strategies: "mouse" (CDP mouse events with interpolated path — sliders, canvas, CAPTCHAs), "html5" (synthetic HTML5 DnD events — Sortable.js, react-dnd, native DnD), "auto" (try mouse first, fall back to html5). Use x,y for elements inside iframes or not in the accessibility tree (take a screenshot first to identify coordinates).',
+    description: 'Drag from (x1,y1) to (x2,y2) with interpolated mouse moves. Uses OS-level input — works on CAPTCHAs and canvases.',
     inputSchema: {
       type: 'object',
       properties: {
-        ref: { type: 'string', description: 'Element ref to drag (from navvi_inspect JSONL). Omit when using x,y.' },
-        x: { type: 'number', description: 'X coordinate of drag start (pixels from left). Use with y instead of ref.' },
-        y: { type: 'number', description: 'Y coordinate of drag start (pixels from top). Use with x instead of ref.' },
-        targetRef: { type: 'string', description: 'Drop target element ref (for html5 strategy). If omitted, uses dragX/dragY offsets.' },
-        dragX: { type: 'number', description: 'Horizontal pixels to drag (positive = right, negative = left).' },
-        dragY: { type: 'number', description: 'Vertical pixels to drag (positive = down, negative = up).' },
-        strategy: { type: 'string', enum: ['auto', 'mouse', 'html5'], description: 'Drag strategy (default: auto). "mouse" = CDP mouse events, "html5" = synthetic DnD events, "auto" = try mouse then html5.' },
-        persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
+        x1: { type: 'number', description: 'Start X' },
+        y1: { type: 'number', description: 'Start Y' },
+        x2: { type: 'number', description: 'End X' },
+        y2: { type: 'number', description: 'End Y' },
+        steps: { type: 'number', description: 'Interpolation steps (default: 20)' },
+        duration: { type: 'number', description: 'Drag duration in seconds (default: 0.3)' },
+        persona: { type: 'string', description: 'Target persona (optional)' },
       },
+      required: ['x1', 'y1', 'x2', 'y2'],
     },
   },
   {
     name: 'navvi_mousedown',
-    description: 'Press and hold the mouse button without releasing. Use with navvi_mouseup for long-press patterns or with navvi_mousemove + navvi_mouseup for coordinate-based drag-and-drop.',
+    description: 'Press and hold mouse button at (x, y). Pair with navvi_mouseup for press-and-hold CAPTCHAs.',
     inputSchema: {
       type: 'object',
       properties: {
-        ref: { type: 'string', description: 'Element ref (from navvi_inspect JSONL). Omit when using x,y.' },
-        x: { type: 'number', description: 'X coordinate (pixels from left). Use with y instead of ref.' },
-        y: { type: 'number', description: 'Y coordinate (pixels from top). Use with x instead of ref.' },
-        persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
-      },
-    },
-  },
-  {
-    name: 'navvi_mouseup',
-    description: 'Release the mouse button. Pair with navvi_mousedown for long-press or drag-and-drop.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        ref: { type: 'string', description: 'Element ref (from navvi_inspect JSONL). Omit when using x,y.' },
-        x: { type: 'number', description: 'X coordinate (pixels from left). Use with y instead of ref.' },
-        y: { type: 'number', description: 'Y coordinate (pixels from top). Use with x instead of ref.' },
-        persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
-      },
-    },
-  },
-  {
-    name: 'navvi_mousemove',
-    description: 'Move the mouse to a position without clicking. Use between navvi_mousedown and navvi_mouseup for coordinate-based drag-and-drop. Also useful for hover effects on elements not in the accessibility tree.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        x: { type: 'number', description: 'X coordinate to move to (pixels from left).' },
-        y: { type: 'number', description: 'Y coordinate to move to (pixels from top).' },
-        steps: { type: 'number', description: 'Number of intermediate mousemove events to interpolate from current position (default: 1 = instant move). Use 10-30 for smooth drag paths.' },
-        persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
+        x: { type: 'number', description: 'X coordinate' },
+        y: { type: 'number', description: 'Y coordinate' },
+        persona: { type: 'string', description: 'Target persona (optional)' },
       },
       required: ['x', 'y'],
     },
   },
   {
-    name: 'navvi_screenshot',
-    description: 'Take a screenshot of the current page. Saves image to /tmp and returns the file path. EXPENSIVE — use navvi_inspect instead when you only need element refs. Only use this when you need to visually verify what the page looks like. Optionally also runs navvi_inspect (default: true).',
+    name: 'navvi_mouseup',
+    description: 'Release mouse button at (x, y). Pair with navvi_mousedown.',
     inputSchema: {
       type: 'object',
       properties: {
-        describe: { type: 'boolean', default: true, description: 'Also run navvi_inspect and include page summary (default: true). Set false for image only.' },
-        persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
+        x: { type: 'number', description: 'X coordinate' },
+        y: { type: 'number', description: 'Y coordinate' },
+        persona: { type: 'string', description: 'Target persona (optional)' },
+      },
+      required: ['x', 'y'],
+    },
+  },
+  {
+    name: 'navvi_mousemove',
+    description: 'Move mouse to (x, y) without clicking. Useful for hover effects.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        x: { type: 'number', description: 'X coordinate' },
+        y: { type: 'number', description: 'Y coordinate' },
+        persona: { type: 'string', description: 'Target persona (optional)' },
+      },
+      required: ['x', 'y'],
+    },
+  },
+  {
+    name: 'navvi_scroll',
+    description: 'Scroll the page in a given direction.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        direction: { type: 'string', enum: ['up', 'down', 'left', 'right'], description: 'Scroll direction (default: down)' },
+        amount: { type: 'number', description: 'Number of scroll clicks (default: 3)' },
+        persona: { type: 'string', description: 'Target persona (optional)' },
+      },
+    },
+  },
+  {
+    name: 'navvi_screenshot',
+    description: 'Take a screenshot of the virtual display. Returns file path. Use this to see what the browser shows and identify coordinates for click/fill/drag.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        persona: { type: 'string', description: 'Target persona (optional)' },
+      },
+    },
+  },
+  {
+    name: 'navvi_url',
+    description: 'Get the current page URL.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        persona: { type: 'string', description: 'Target persona (optional)' },
+      },
+    },
+  },
+  {
+    name: 'navvi_vnc',
+    description: 'Get the noVNC URL for live browser view. Open this in a real browser for human intervention (CAPTCHAs, OAuth, etc.).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        persona: { type: 'string', description: 'Target persona (optional)' },
       },
     },
   },
   // Video recording
   {
     name: 'navvi_record_start',
-    description: 'Start recording the browser tab via PinchTab CDP screenshots. Captures frames in background, assembles to MP4 on stop. Works on any platform (local + remote).',
+    description: 'Start recording the browser via screenshot polling. Captures frames in background, assembles to MP4 on stop.',
     inputSchema: {
       type: 'object',
       properties: {
-        duration: { type: 'number', description: 'Max duration in seconds (default: 30, max: 120). Recording auto-stops after this.' },
-        persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
+        duration: { type: 'number', description: 'Max duration in seconds (default: 30, max: 120)' },
+        persona: { type: 'string', description: 'Target persona (optional)' },
       },
     },
   },
   {
     name: 'navvi_record_stop',
-    description: 'Stop an active recording. Returns the file path, size, and duration. When trim is enabled (default), also produces a trimmed version that keeps only frames around actions (open/click/fill/press). Do NOT use Read on the video file.',
+    description: 'Stop recording and assemble frames into MP4. Optionally trims dead time between actions.',
     inputSchema: {
       type: 'object',
       properties: {
-        trim: { type: 'boolean', description: 'Produce a trimmed version that cuts dead time between actions (default: true). Original is always preserved.' },
+        trim: { type: 'boolean', description: 'Trim dead time between actions (default: true)' },
       },
     },
   },
   {
     name: 'navvi_record_gif',
-    description: 'Convert a recorded video to an optimized GIF (1600px wide, 8fps, palette-optimized). Returns the GIF file path and size.',
+    description: 'Convert a recorded video to an optimized GIF (1600px wide, 8fps, palette-optimized).',
     inputSchema: {
       type: 'object',
       properties: {
-        input: { type: 'string', description: 'Path to input video file. If omitted, uses the most recent recording.' },
+        input: { type: 'string', description: 'Path to input video. If omitted, uses most recent recording.' },
       },
     },
   },
@@ -496,57 +454,99 @@ const TOOLS = [
 
 // --- Tool Handlers ---
 
+/** Resolve which persona to target and return its API base URL */
+function resolvePersona(persona) {
+  const name = persona || activePersona || 'default';
+  const ports = getContainerPorts(name);
+  return { name, apiBase: `http://127.0.0.1:${ports.api}` };
+}
+
 async function handleTool(name, args) {
   switch (name) {
     // --- Lifecycle ---
 
     case 'navvi_start': {
-      const currentMode = getMode();
-      if (currentMode) {
-        return `Navvi is already running in ${currentMode} mode.\nUse navvi_stop first, or navvi_status to check.`;
-      }
+      const mode = args.mode || 'local';
+      const persona = args.persona || 'default';
 
-      if (args.mode === 'local') {
-        // Check dependencies
+      if (mode === 'local') {
         const missing = checkLocalDeps();
         if (missing.length > 0) return formatMissing(missing);
 
-        // Check if PinchTab is already running
-        if (isPinchtabReachable()) {
-          setMode('local');
-          return 'Navvi started (local). PinchTab was already running on port ' + PINCHTAB_PORT + '.';
+        const cname = containerName(persona);
+
+        // Check if already running
+        const existing = sh(`docker ps -q --filter "name=${cname}" 2>/dev/null`);
+        if (existing) {
+          const ports = getContainerPorts(persona);
+          const reachable = isApiReachable(ports.api);
+          activePersona = persona;
+          navviApi = `http://127.0.0.1:${ports.api}`;
+          return `Container ${cname} already running.\nAPI: http://127.0.0.1:${ports.api} (${reachable ? 'healthy' : 'starting...'})\nVNC: http://127.0.0.1:${ports.vnc}`;
         }
 
-        // Start PinchTab locally
-        const child = spawn(pinchtabBin, ['server'], {
-          detached: true,
-          stdio: 'ignore',
-        });
-        child.unref();
-        fs.writeFileSync(PIDFILE_LOCAL, String(child.pid));
+        // Remove stopped container with same name
+        sh(`docker rm ${cname} 2>/dev/null`);
 
-        // Wait for PinchTab to launch Chrome and be ready
-        await new Promise((r) => setTimeout(r, 4000));
-        const reachable = isPinchtabReachable();
-        if (reachable) {
-          setMode('local');
-          return `Navvi started (local). PinchTab running on port ${PINCHTAB_PORT} (PID ${child.pid}).\nLaunch a browser with navvi_up.`;
-        } else {
-          return `PinchTab started (PID ${child.pid}) but not yet reachable.\nIt may need a moment — try navvi_status in a few seconds.`;
+        // Read persona config for locale/timezone
+        const config = readPersonaYaml(persona);
+        const locale = config.locale || 'en-US';
+        const timezone = config.timezone || 'UTC';
+
+        // Docker volume for persistent Firefox profile
+        const volumeName = `navvi-profile-${persona}`;
+
+        // Find free ports if default persona ports are taken
+        let apiPort = NAVVI_PORT;
+        let vncPort = VNC_PORT;
+        // For non-default personas, offset ports
+        if (persona !== 'default') {
+          // Simple hash to get port offset
+          let hash = 0;
+          for (const ch of persona) hash = ((hash << 5) - hash + ch.charCodeAt(0)) | 0;
+          const offset = (Math.abs(hash) % 100) + 1;
+          apiPort = NAVVI_PORT + offset;
+          vncPort = VNC_PORT + offset;
         }
+
+        const dockerArgs = [
+          'run', '-d',
+          '--name', cname,
+          '-p', `${apiPort}:8024`,
+          '-p', `${vncPort}:6080`,
+          '-v', `${volumeName}:/home/user/.mozilla`,
+          '-e', `LOCALE=${locale}`,
+          '-e', `TIMEZONE=${timezone}`,
+          DOCKER_IMAGE,
+        ];
+
+        const result = sh(`docker ${dockerArgs.join(' ')}`);
+        if (result.includes('Error') || result.includes('error')) {
+          return `Failed to start container:\n${result}\n\nMake sure the image is built: docker build -t navvi container/`;
+        }
+
+        // Wait for API to be ready
+        activePersona = persona;
+        navviApi = `http://127.0.0.1:${apiPort}`;
+
+        let ready = false;
+        for (let i = 0; i < 15; i++) {
+          await new Promise(r => setTimeout(r, 1000));
+          if (isApiReachable(apiPort)) { ready = true; break; }
+        }
+
+        setMode('local');
+        return `Navvi started (${persona}).\nContainer: ${cname}\nAPI: http://127.0.0.1:${apiPort} (${ready ? 'healthy' : 'starting...'})\nVNC: http://127.0.0.1:${vncPort}\nVolume: ${volumeName} (persistent Firefox profile)\n\nUse navvi_open to navigate, navvi_screenshot to see the page.`;
       }
 
-      if (args.mode === 'remote') {
-        // Check dependencies
+      if (mode === 'remote') {
         const missing = checkRemoteDeps();
         if (missing.length > 0) return formatMissing(missing);
 
         let csName = args.name;
         if (csName) {
-          // Resume existing
           sh(`gh cs start -c ${csName}`);
         } else {
-          // Try to find an existing stopped one first
           const stopped = sh(`gh cs list --repo ${REPO} --json name,state -q '.[] | select(.state=="Shutdown") | .name'`);
           if (stopped) {
             csName = stopped.split('\n')[0];
@@ -558,79 +558,81 @@ async function handleTool(name, args) {
 
         if (!csName) return 'Failed to start Codespace. Check gh auth status.';
 
-        // Port forward
+        // Port forward both API and VNC
         killPidfile(PIDFILE_FWD);
-        const child = spawn('gh', ['cs', 'ports', 'forward', `${PINCHTAB_PORT}:${PINCHTAB_PORT}`, '-c', csName], {
+        const child = spawn('gh', ['cs', 'ports', 'forward', `${NAVVI_PORT}:${NAVVI_PORT}`, `${VNC_PORT}:${VNC_PORT}`, '-c', csName], {
           detached: true,
           stdio: 'ignore',
         });
         child.unref();
         fs.writeFileSync(PIDFILE_FWD, String(child.pid));
 
-        await new Promise((r) => setTimeout(r, 3000));
-        const reachable = isPinchtabReachable();
+        await new Promise(r => setTimeout(r, 3000));
+        const reachable = isApiReachable(NAVVI_PORT);
         setMode('remote:' + csName);
-        return `Navvi started (remote). Codespace: ${csName}\n  Port forward: localhost:${PINCHTAB_PORT} → Codespace\n  PinchTab: ${reachable ? 'reachable' : 'not yet reachable (may need to start PinchTab inside the Codespace)'}\nLaunch a browser with navvi_up.`;
+        activePersona = persona;
+        return `Navvi started (remote). Codespace: ${csName}\nAPI: localhost:${NAVVI_PORT} (${reachable ? 'healthy' : 'starting...'})\nVNC: localhost:${VNC_PORT}`;
       }
 
       return 'Invalid mode. Use "local" or "remote".';
     }
 
     case 'navvi_stop': {
-      const currentMode = getMode();
-      if (!currentMode) return 'Navvi is not running.';
+      const persona = args.persona;
 
-      if (currentMode === 'local') {
-        killPidfile(PIDFILE_LOCAL);
-        clearMode();
-        return 'Navvi stopped (local). PinchTab killed.';
+      if (persona) {
+        const cname = containerName(persona);
+        sh(`docker stop ${cname} 2>/dev/null`);
+        sh(`docker rm ${cname} 2>/dev/null`);
+        if (activePersona === persona) activePersona = null;
+        return `Stopped ${cname}. Firefox profile preserved in volume navvi-profile-${persona}.`;
       }
 
-      if (currentMode.startsWith('remote:')) {
-        const csName = args.name || currentMode.split(':')[1];
-        killPidfile(PIDFILE_FWD);
-        if (csName) sh(`gh cs stop -c ${csName}`);
+      // Stop all navvi containers
+      const containers = listContainers();
+      if (containers.length === 0) {
+        // Also handle remote mode
+        const currentMode = getMode();
+        if (currentMode && currentMode.startsWith('remote:')) {
+          const csName = currentMode.split(':')[1];
+          killPidfile(PIDFILE_FWD);
+          if (csName) sh(`gh cs stop -c ${csName}`);
+          clearMode();
+          return `Stopped remote Codespace ${csName}.`;
+        }
         clearMode();
-        return `Navvi stopped (remote). Codespace ${csName} stopped, port forward killed.`;
+        return 'No running Navvi containers.';
       }
 
+      for (const c of containers) {
+        sh(`docker stop ${containerName(c.name)} 2>/dev/null`);
+        sh(`docker rm ${containerName(c.name)} 2>/dev/null`);
+      }
+      activePersona = null;
       clearMode();
-      return 'Navvi stopped.';
+      return `Stopped ${containers.length} container(s). Firefox profiles preserved in Docker volumes.`;
     }
 
     case 'navvi_status': {
       const currentMode = getMode();
-      const reachable = isPinchtabReachable();
-      let status = `Mode: ${currentMode || 'off'}\nPinchTab: ${reachable ? 'reachable' : 'not reachable'}`;
+      const containers = listContainers();
+      let status = `Mode: ${currentMode || 'off'}\nActive persona: ${activePersona || 'none'}`;
 
-      if (fs.existsSync(PIDFILE_LOCAL)) {
-        status += `\nLocal PinchTab PID: ${fs.readFileSync(PIDFILE_LOCAL, 'utf8').trim()}`;
+      if (containers.length > 0) {
+        status += '\n\nRunning containers:';
+        for (const c of containers) {
+          const ports = getContainerPorts(c.name);
+          const healthy = isApiReachable(ports.api);
+          status += `\n  ${c.name} — API :${ports.api} (${healthy ? 'healthy' : 'unhealthy'}), VNC :${ports.vnc}`;
+        }
+      } else {
+        status += '\n\nNo running containers. Start one with navvi_start.';
       }
+
       if (fs.existsSync(PIDFILE_FWD)) {
         status += `\nPort forward PID: ${fs.readFileSync(PIDFILE_FWD, 'utf8').trim()}`;
       }
 
-      if (reachable) {
-        try {
-          const instances = await apiCall('GET', '/instances');
-          if (Array.isArray(instances) && instances.length > 0) {
-            status += '\n\nBrowser instances:\n' +
-              instances.map((i) => `  ${i.name || 'unnamed'} — ${i.id} (${i.mode || 'unknown'})`).join('\n');
-          } else {
-            status += '\n\nNo browser instances running. Launch one with navvi_up.';
-          }
-        } catch {
-          status += '\n\nCould not list instances.';
-        }
-      }
-      // Show persona registry
-      const regEntries = Object.entries(instanceRegistry);
-      if (regEntries.length > 0) {
-        status += `\n\nPersona registry (active: ${activePersona || 'none'}):`;
-        for (const [name, id] of regEntries) {
-          status += `\n  ${name} → ${id}${name === activePersona ? ' ★' : ''}`;
-        }
-      }
       return status;
     }
 
@@ -639,428 +641,169 @@ async function handleTool(name, args) {
       if (missing.length > 0) return formatMissing(missing);
 
       const output = sh(`gh cs list --repo ${REPO} --json name,state,createdAt,machine -q '.[] | "\\(.name)  \\(.state)  \\(.machine.displayName // "unknown")  \\(.createdAt)"'`);
-      if (!output) return `No Codespaces found for ${REPO}.\nCreate one with navvi_start --mode remote.`;
+      if (!output) return `No Codespaces found for ${REPO}.`;
       return `Navvi Codespaces:\n${output}`;
     }
 
-    // --- Browser control (PinchTab) ---
-
-    case 'navvi_up': {
-      if (!isPinchtabReachable()) return 'PinchTab not reachable. Run navvi_start first.';
-      const { persona, mode = 'headed' } = args;
-
-      // Read persona YAML for stealth config (arg override takes precedence)
-      let stealthLevel = args.stealth || '';
-      if (!stealthLevel) {
-        try {
-          const ymlPath = path.join(process.cwd(), '.navvi', 'personas', `${persona}.yml`);
-          const yml = fs.readFileSync(ymlPath, 'utf8');
-          // Simple YAML parse: look for stealth field under browser
-          const stealthMatch = yml.match(/^\s*stealth:\s*(.+)/m);
-          if (stealthMatch) {
-            const val = stealthMatch[1].trim().toLowerCase();
-            if (['off', 'light', 'full', 'maximum'].includes(val)) stealthLevel = val;
-          }
-        } catch {} // persona YAML missing — use PinchTab default
-      }
-
-      const launchParams = {
-        name: persona,
-        mode,
-        profile: `.navvi/profiles/${persona}`,
-      };
-      if (stealthLevel) launchParams.stealthLevel = stealthLevel;
-
-      const result = await apiCall('POST', '/instances/launch', launchParams);
-      const instId = result.id || result.instanceId;
-      if (instId) {
-        instanceRegistry[persona] = instId;
-        activePersona = persona;
-      }
-      let msg = `Instance launched: ${instId || JSON.stringify(result)}`;
-      if (stealthLevel) msg += ` (stealth: ${stealthLevel})`;
-      return msg;
-    }
-
-    case 'navvi_down': {
-      if (!isPinchtabReachable()) return 'PinchTab not reachable.';
-      const instances = await apiCall('GET', '/instances');
-      if (!Array.isArray(instances) || instances.length === 0) return 'No running instances.';
-      const toStop = args.persona
-        ? instances.filter((i) => i.name === args.persona)
-        : instances;
-      for (const inst of toStop) {
-        await apiCall('DELETE', `/instances/${inst.id}`);
-      }
-      // Clean registry
-      if (args.persona) {
-        delete instanceRegistry[args.persona];
-        if (activePersona === args.persona) activePersona = null;
-      } else {
-        for (const key of Object.keys(instanceRegistry)) delete instanceRegistry[key];
-        activePersona = null;
-      }
-      return `Stopped ${toStop.length} instance(s).`;
-    }
+    // --- Browser control ---
 
     case 'navvi_open': {
-      const instId = await getInstance(args.persona);
-      if (!instId) return 'Error: no running instance. Use navvi_up first.';
-      const tabId = await getFirstTab(instId);
-      if (!tabId) return 'Error: no open tab.';
+      const { name: pName, apiBase } = resolvePersona(args.persona);
       logAction('open', args.url);
-      const result = await apiCall('POST', `/tabs/${tabId}/navigate`, { url: args.url });
-
-      let msg = `Opened ${args.url}` + (result.tabId ? ` (tab: ${result.tabId})` : '');
-
-      // Auto-inspect after page load (unless opted out)
-      if (args.inspect !== false) {
-        // Wait for DOM to settle — navigation may still be loading
-        await new Promise((r) => setTimeout(r, 1500));
-        try {
-          const info = await autoInspect(tabId);
-          msg += `\n\n${info.count} nodes — ${info.path}\nPage: ${info.title || info.url || '(untitled)'}\n\nGrep the JSONL for element refs before calling navvi_click or navvi_fill.`;
-        } catch {
-          msg += '\n\n(Auto-inspect failed — call navvi_inspect manually.)';
-        }
+      try {
+        const result = await apiCall('POST', '/navigate', { url: args.url }, apiBase);
+        return `Opened ${args.url}\nTitle: ${result.title || '(loading...)'}\nURL: ${result.url || args.url}`;
+      } catch (e) {
+        return `Error navigating: ${e.message}`;
       }
-
-      return msg;
-    }
-
-    case 'navvi_inspect': {
-      const instId = await getInstance(args.persona);
-      if (!instId) return 'Error: no running instance.';
-      const tabId = await getFirstTab(instId);
-      if (!tabId) return 'Error: no open tab.';
-      const snapshot = await apiCall('GET', `/tabs/${tabId}/snapshot`);
-      const info = saveSnapshotToFile(snapshot);
-      return `${info.count} nodes — ${info.path}\nPage: ${info.title || info.url || '(untitled)'}\n\nGrep this file for element refs — e.g. grep "combobox" or "button" to find interactive elements.`;
     }
 
     case 'navvi_click': {
-      const instId = await getInstance(args.persona);
-      if (!instId) return 'Error: no running instance.';
-      const tabId = await getFirstTab(instId);
-      if (!tabId) return 'Error: no open tab.';
-      if (args.x !== undefined && args.y !== undefined) {
-        logAction('click', `(${args.x}, ${args.y})`);
-        await apiCall('POST', `/tabs/${tabId}/action`, { type: 'mouse', kind: 'click', x: args.x, y: args.y, hasXY: true });
+      const { name: pName, apiBase } = resolvePersona(args.persona);
+      logAction('click', `(${args.x}, ${args.y})`);
+      try {
+        await apiCall('POST', '/click', { x: args.x, y: args.y }, apiBase);
         return `Clicked at (${args.x}, ${args.y})`;
+      } catch (e) {
+        return `Error: ${e.message}`;
       }
-      if (!args.ref) return 'Error: provide either ref or x,y coordinates.';
-      logAction('click', args.ref);
-      await apiCall('POST', `/tabs/${tabId}/action`, { type: 'mouse', kind: 'click', ref: args.ref });
-      return `Clicked ${args.ref}`;
     }
 
     case 'navvi_fill': {
-      const instId = await getInstance(args.persona);
-      if (!instId) return 'Error: no running instance.';
-      const tabId = await getFirstTab(instId);
-      if (!tabId) return 'Error: no open tab.';
-      const charDelay = args.delay !== undefined ? args.delay : 25;
-
-      // Log fill action with estimated duration so trim knows how long typing takes
-      const fillDurationMs = args.value.length * (charDelay || 25);
-      logAction('fill', { ref: args.ref, text: args.value, durationMs: fillDurationMs });
-
-      // Verify helper: check if element contains expected value
-      async function verifyFill() {
-        const snapshot = await apiCall('GET', `/tabs/${tabId}/snapshot`);
-        const data = typeof snapshot === 'string' ? JSON.parse(snapshot) : snapshot;
-        const nodes = data.nodes || [];
-        const target = nodes.find((n) => n.ref === args.ref);
-        saveSnapshotToFile(snapshot);
-        if (target) {
-          const actual = target.value || target.name || '';
-          if (actual.includes(args.value)) return { ok: true, actual };
-          return { ok: false, actual };
-        }
-        return { ok: false, actual: '' };
+      const { name: pName, apiBase } = resolvePersona(args.persona);
+      const delay = args.delay !== undefined ? args.delay : 12;
+      const fillDurationMs = args.value.length * delay;
+      logAction('fill', { x: args.x, y: args.y, text: args.value, durationMs: fillDurationMs });
+      try {
+        // Click to focus
+        await apiCall('POST', '/click', { x: args.x, y: args.y }, apiBase);
+        await new Promise(r => setTimeout(r, 100));
+        // Type
+        await apiCall('POST', '/type', { text: args.value, delay }, apiBase);
+        return `Filled at (${args.x}, ${args.y}) with "${args.value}" (${args.value.length} chars)`;
+      } catch (e) {
+        return `Error: ${e.message}`;
       }
-
-      // Strategy 1: Click + char-by-char keystroke events (most realistic)
-      const strategies = [
-        {
-          name: 'type',
-          desc: 'keystroke',
-          run: async () => {
-            await apiCall('POST', `/tabs/${tabId}/action`, { type: 'mouse', kind: 'click', ref: args.ref });
-            for (let i = 0; i < args.value.length; i++) {
-              await apiCall('POST', `/tabs/${tabId}/action`, {
-                type: 'keyboard', kind: 'type', ref: args.ref, text: args.value[i],
-              });
-              if (charDelay > 0) await new Promise((r) => setTimeout(r, charDelay));
-            }
-          },
-        },
-        // Strategy 2: Direct fill (sets value property, fires change)
-        {
-          name: 'fill',
-          desc: 'direct',
-          run: async () => {
-            await apiCall('POST', `/tabs/${tabId}/action`, { type: 'fill', ref: args.ref, value: args.value });
-          },
-        },
-        // Strategy 3: Click to focus + insertText (paste-like, no individual key events)
-        {
-          name: 'insertText',
-          desc: 'insertText',
-          run: async () => {
-            await apiCall('POST', `/tabs/${tabId}/action`, { type: 'mouse', kind: 'click', ref: args.ref });
-            await apiCall('POST', `/tabs/${tabId}/action`, { type: 'keyboard', kind: 'insertText', text: args.value });
-          },
-        },
-      ];
-
-      const errors = [];
-      for (const strategy of strategies) {
-        try {
-          await strategy.run();
-          const result = await verifyFill();
-          if (result.ok) {
-            let msg = `Filled ${args.ref} with "${args.value}" (strategy: ${strategy.desc})`;
-            if (errors.length > 0) msg += `\nFailed strategies: ${errors.map(e => e.name).join(', ')}`;
-            msg += `\nVerified: value contains "${args.value}"`;
-            return msg;
-          }
-          errors.push({ name: strategy.desc, reason: `value is "${result.actual}"` });
-        } catch (e) {
-          errors.push({ name: strategy.desc, reason: e.message });
-        }
-      }
-
-      // All strategies failed
-      const failDetail = errors.map(e => `  ${e.name}: ${e.reason}`).join('\n');
-      return `Error: all fill strategies failed for ${args.ref} with "${args.value}":\n${failDetail}`;
     }
 
     case 'navvi_press': {
-      const instId = await getInstance(args.persona);
-      if (!instId) return 'Error: no running instance.';
-      const tabId = await getFirstTab(instId);
-      if (!tabId) return 'Error: no open tab.';
+      const { name: pName, apiBase } = resolvePersona(args.persona);
       logAction('press', args.key);
-      await apiCall('POST', `/tabs/${tabId}/action`, { type: 'keyboard', kind: 'press', key: args.key });
-      return `Pressed ${args.key}`;
+      try {
+        await apiCall('POST', '/key', { key: args.key }, apiBase);
+        return `Pressed ${args.key}`;
+      } catch (e) {
+        return `Error: ${e.message}`;
+      }
     }
 
     case 'navvi_drag': {
-      const instId = await getInstance(args.persona);
-      if (!instId) return 'Error: no running instance.';
-      const tabId = await getFirstTab(instId);
-      if (!tabId) return 'Error: no open tab.';
-      const hasXY = args.x !== undefined && args.y !== undefined;
-      if (!args.ref && !hasXY) return 'Error: provide either ref or x,y coordinates for drag.';
-      const strategy = args.strategy || 'auto';
-      const dx = args.dragX || 0;
-      const dy = args.dragY || 0;
-
-      // Resolve targetRef to targetNodeId from snapshot JSONL
-      function resolveRefToNodeId(ref) {
-        try {
-          const data = fs.readFileSync(SNAPSHOT_DIR + '/latest.jsonl', 'utf8');
-          for (const line of data.split('\n')) {
-            if (!line.trim()) continue;
-            const node = JSON.parse(line);
-            if (node.ref === ref) return node.nodeId;
-          }
-        } catch {}
-        return null;
+      const { name: pName, apiBase } = resolvePersona(args.persona);
+      logAction('drag', { from: [args.x1, args.y1], to: [args.x2, args.y2] });
+      try {
+        const params = {
+          x1: args.x1, y1: args.y1,
+          x2: args.x2, y2: args.y2,
+        };
+        if (args.steps) params.steps = args.steps;
+        if (args.duration) params.duration = args.duration;
+        await apiCall('POST', '/drag', params, apiBase);
+        return `Dragged from (${args.x1}, ${args.y1}) to (${args.x2}, ${args.y2})`;
+      } catch (e) {
+        return `Error: ${e.message}`;
       }
-
-      // Helper: get snapshot of element positions for change detection
-      async function getElementOrder() {
-        const snapshot = await apiCall('GET', `/tabs/${tabId}/snapshot`);
-        const data = typeof snapshot === 'string' ? JSON.parse(snapshot) : snapshot;
-        const nodes = data.nodes || [];
-        return nodes.filter(n => n.ref).map(n => `${n.ref}:${n.depth}`).join(',');
-      }
-
-      // Mouse strategy: CDP mouse events (sliders, canvas, CAPTCHAs)
-      async function tryMouse() {
-        if (dx === 0 && dy === 0) return { ok: false, reason: 'dragX or dragY required for mouse strategy' };
-        if (hasXY) {
-          await apiCall('POST', `/tabs/${tabId}/action`, { type: 'mouse', kind: 'drag', x: args.x, y: args.y, hasXY: true, dragX: dx, dragY: dy });
-        } else {
-          await apiCall('POST', `/tabs/${tabId}/action`, { type: 'mouse', kind: 'drag', ref: args.ref, dragX: dx, dragY: dy });
-        }
-        return { ok: true, strategy: 'mouse' };
-      }
-
-      // HTML5 strategy: synthetic DnD events (Sortable.js, react-dnd, native DnD)
-      async function tryHTML5() {
-        let targetNodeId = null;
-        if (args.targetRef) {
-          targetNodeId = resolveRefToNodeId(args.targetRef);
-          if (!targetNodeId) return { ok: false, reason: `targetRef "${args.targetRef}" not found in snapshot` };
-        } else {
-          return { ok: false, reason: 'html5 strategy requires targetRef' };
-        }
-        await apiCall('POST', `/tabs/${tabId}/action`, { type: 'mouse', kind: 'html5drag', ref: args.ref, targetNodeId: targetNodeId });
-        return { ok: true, strategy: 'html5' };
-      }
-
-      const source = hasXY ? `(${args.x}, ${args.y})` : args.ref;
-      logAction('drag', { source, dx, dy, strategy, targetRef: args.targetRef });
-
-      if (strategy === 'mouse') {
-        const result = await tryMouse();
-        if (!result.ok) return `Error: ${result.reason}`;
-        return `Dragged ${source} by (${dx}, ${dy}) [mouse]`;
-      }
-
-      if (strategy === 'html5') {
-        if (hasXY) return 'Error: html5 strategy requires ref, not x/y coordinates.';
-        const result = await tryHTML5();
-        if (!result.ok) return `Error: ${result.reason}`;
-        return `Dragged ${args.ref} to ${args.targetRef} [html5]`;
-      }
-
-      // Auto: try mouse first, detect change, fall back to html5
-      const beforeState = await getElementOrder();
-      const mouseResult = await tryMouse().catch(e => ({ ok: false, reason: e.message }));
-      if (mouseResult.ok) {
-        const afterState = await getElementOrder();
-        if (afterState !== beforeState) {
-          return `Dragged ${source} by (${dx}, ${dy}) [mouse]`;
-        }
-        // Mouse didn't change DOM — try html5 if targetRef is available
-        if (args.targetRef && args.ref) {
-          const html5Result = await tryHTML5().catch(e => ({ ok: false, reason: e.message }));
-          if (html5Result.ok) {
-            return `Dragged ${args.ref} to ${args.targetRef} [html5, mouse had no effect]`;
-          }
-          return `Warning: both strategies attempted. Mouse had no visible effect, html5 failed: ${html5Result.reason}`;
-        }
-        return `Dragged ${source} by (${dx}, ${dy}) [mouse] — no DOM change detected (may need targetRef for html5 fallback)`;
-      }
-      // Mouse failed entirely
-      if (args.targetRef && args.ref) {
-        const html5Result = await tryHTML5().catch(e => ({ ok: false, reason: e.message }));
-        if (html5Result.ok) {
-          return `Dragged ${args.ref} to ${args.targetRef} [html5, mouse failed: ${mouseResult.reason}]`;
-        }
-        return `Error: both strategies failed. Mouse: ${mouseResult.reason}. HTML5: ${html5Result.reason}`;
-      }
-      return `Error: mouse strategy failed (${mouseResult.reason}) and no targetRef for html5 fallback`;
     }
 
     case 'navvi_mousedown': {
-      const instId = await getInstance(args.persona);
-      if (!instId) return 'Error: no running instance.';
-      const tabId = await getFirstTab(instId);
-      if (!tabId) return 'Error: no open tab.';
-      if (args.x !== undefined && args.y !== undefined) {
-        logAction('mousedown', `(${args.x}, ${args.y})`);
-        await apiCall('POST', `/tabs/${tabId}/action`, { type: 'mouse', kind: 'mousedown', x: args.x, y: args.y, hasXY: true });
+      const { name: pName, apiBase } = resolvePersona(args.persona);
+      logAction('mousedown', `(${args.x}, ${args.y})`);
+      try {
+        await apiCall('POST', '/mousedown', { x: args.x, y: args.y }, apiBase);
         return `Mouse down at (${args.x}, ${args.y})`;
+      } catch (e) {
+        return `Error: ${e.message}`;
       }
-      if (!args.ref) return 'Error: provide either ref or x,y coordinates.';
-      logAction('mousedown', args.ref);
-      await apiCall('POST', `/tabs/${tabId}/action`, { type: 'mouse', kind: 'mousedown', ref: args.ref });
-      return `Mouse down on ${args.ref}`;
     }
 
     case 'navvi_mouseup': {
-      const instId = await getInstance(args.persona);
-      if (!instId) return 'Error: no running instance.';
-      const tabId = await getFirstTab(instId);
-      if (!tabId) return 'Error: no open tab.';
-      if (args.x !== undefined && args.y !== undefined) {
-        logAction('mouseup', `(${args.x}, ${args.y})`);
-        await apiCall('POST', `/tabs/${tabId}/action`, { type: 'mouse', kind: 'mouseup', x: args.x, y: args.y, hasXY: true });
+      const { name: pName, apiBase } = resolvePersona(args.persona);
+      logAction('mouseup', `(${args.x}, ${args.y})`);
+      try {
+        await apiCall('POST', '/mouseup', { x: args.x, y: args.y }, apiBase);
         return `Mouse up at (${args.x}, ${args.y})`;
+      } catch (e) {
+        return `Error: ${e.message}`;
       }
-      if (!args.ref) return 'Error: provide either ref or x,y coordinates.';
-      logAction('mouseup', args.ref);
-      await apiCall('POST', `/tabs/${tabId}/action`, { type: 'mouse', kind: 'mouseup', ref: args.ref });
-      return `Mouse up on ${args.ref}`;
     }
 
     case 'navvi_mousemove': {
-      const instId = await getInstance(args.persona);
-      if (!instId) return 'Error: no running instance.';
-      const tabId = await getFirstTab(instId);
-      if (!tabId) return 'Error: no open tab.';
-      const steps = args.steps || 1;
-      logAction('mousemove', `(${args.x}, ${args.y}) steps=${steps}`);
-      // For smooth movement, send multiple hover events interpolated from current position
-      // PinchTab's hover action dispatches mouseMoved events
-      if (steps <= 1) {
-        await apiCall('POST', `/tabs/${tabId}/action`, { type: 'mouse', kind: 'hover', x: args.x, y: args.y, hasXY: true });
-      } else {
-        await apiCall('POST', `/tabs/${tabId}/action`, { type: 'mouse', kind: 'hover', x: args.x, y: args.y, hasXY: true });
+      const { name: pName, apiBase } = resolvePersona(args.persona);
+      logAction('mousemove', `(${args.x}, ${args.y})`);
+      try {
+        await apiCall('POST', '/mousemove', { x: args.x, y: args.y }, apiBase);
+        return `Mouse moved to (${args.x}, ${args.y})`;
+      } catch (e) {
+        return `Error: ${e.message}`;
       }
-      return `Mouse moved to (${args.x}, ${args.y})`;
+    }
+
+    case 'navvi_scroll': {
+      const { name: pName, apiBase } = resolvePersona(args.persona);
+      const direction = args.direction || 'down';
+      const amount = args.amount || 3;
+      logAction('scroll', `${direction} x${amount}`);
+      try {
+        await apiCall('POST', '/scroll', { direction, amount }, apiBase);
+        return `Scrolled ${direction} x${amount}`;
+      } catch (e) {
+        return `Error: ${e.message}`;
+      }
     }
 
     case 'navvi_screenshot': {
-      const instId = await getInstance(args.persona);
-      if (!instId) return 'Error: no running instance.';
-      const tabId = await getFirstTab(instId);
-      if (!tabId) return 'Error: no open tab.';
+      const { name: pName, apiBase } = resolvePersona(args.persona);
+      try {
+        const result = await apiCall('GET', '/screenshot', null, apiBase);
+        if (!result.base64) return 'Error: no screenshot data returned.';
 
-      // Save screenshot to /tmp — hit bridge URL directly (server can't see child instance tabs)
-      const instUrl = await getInstanceUrl(instId) || pinchtabApi;
-      const filepath = await new Promise((resolve, reject) => {
-        const url = new URL(`/screenshot?tabId=${tabId}&quality=80&raw=true`, instUrl);
-        const opts = { headers: pinchtabToken ? { 'Authorization': `Bearer ${pinchtabToken}` } : {} };
-        http.get(url, opts, (res) => {
-          const chunks = [];
-          res.on('data', (chunk) => chunks.push(chunk));
-          res.on('end', () => {
-            const raw = Buffer.concat(chunks);
-            let imgBuf;
-            let ext = 'jpg';
-            try {
-              const json = JSON.parse(raw.toString('utf8'));
-              imgBuf = Buffer.from(json.base64 || json.data || '', 'base64');
-            } catch {
-              // Fallback: raw binary image
-              imgBuf = raw;
-              ext = 'png';
-            }
-            const filename = `navvi-screenshot-${Date.now()}.${ext}`;
-            const fp = path.join(os.tmpdir(), filename);
-            fs.writeFileSync(fp, imgBuf);
-            resolve({ path: fp, sizeKB: Math.round(imgBuf.length / 1024) });
-          });
-        }).on('error', reject);
-      });
+        const imgBuf = Buffer.from(result.base64, 'base64');
+        const filename = `navvi-screenshot-${Date.now()}.png`;
+        const filepath = path.join(os.tmpdir(), filename);
+        fs.writeFileSync(filepath, imgBuf);
 
-      let result = `Screenshot saved to ${filepath.path} (${filepath.sizeKB}KB).`;
-
-      if (args.describe !== false) {
-        try {
-          const snapshot = await apiCall('GET', `/tabs/${tabId}/snapshot`);
-          const info = saveSnapshotToFile(snapshot);
-          result += `\nInspect: ${info.count} nodes — ${info.path}`;
-          result += `\nPage: ${info.title || info.url || '(untitled)'}`;
-        } catch {
-          result += '\n(Could not inspect page.)';
-        }
+        const sizeKB = Math.round(imgBuf.length / 1024);
+        return `Screenshot saved to ${filepath} (${sizeKB}KB).\nUse Read tool to view the image.`;
+      } catch (e) {
+        return `Error: ${e.message}`;
       }
-
-      return result;
     }
 
-    // --- Video recording (PinchTab screenshot-based) ---
+    case 'navvi_url': {
+      const { name: pName, apiBase } = resolvePersona(args.persona);
+      try {
+        const result = await apiCall('GET', '/url', null, apiBase);
+        return result.url || '(unknown)';
+      } catch (e) {
+        return `Error: ${e.message}`;
+      }
+    }
+
+    case 'navvi_vnc': {
+      const persona = args.persona || activePersona || 'default';
+      const ports = getContainerPorts(persona);
+      return `noVNC: http://127.0.0.1:${ports.vnc}/vnc.html?autoconnect=true\n\nOpen this URL in a browser for live view. Use for:\n- Human CAPTCHA solving\n- OAuth login flows\n- Visual debugging`;
+    }
+
+    // --- Video recording ---
 
     case 'navvi_record_start': {
-      if (!isPinchtabReachable()) return 'Error: PinchTab not reachable. Use navvi_start first.';
-
-      const instId = await getInstance(args.persona);
-      if (!instId) return 'Error: no running browser instance. Use navvi_up first.';
-      const tabId = await getFirstTab(instId);
-      if (!tabId) return 'Error: no open tab.';
+      const { name: pName, apiBase } = resolvePersona(args.persona);
 
       // Check for existing recording
       const stateFile = path.join(os.tmpdir(), '.navvi-recording.json');
       if (fs.existsSync(stateFile)) {
         const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-        if (state.active) return `Recording already in progress (${state.frames} frames captured). Use navvi_record_stop first.`;
+        if (state.active) return `Recording already in progress (${state.frames} frames). Use navvi_record_stop first.`;
       }
 
       if (!which('ffmpeg')) return 'Error: ffmpeg not installed. Install with: brew install ffmpeg';
@@ -1072,48 +815,44 @@ async function handleTool(name, args) {
       const framesDir = path.join(RECORDINGS_DIR, `frames-${ts}`);
       fs.mkdirSync(framesDir, { recursive: true });
 
-      const state = { active: true, framesDir, ts, fps, duration, tabId, frames: 0, startTime: Date.now() };
+      const state = { active: true, framesDir, ts, fps, duration, frames: 0, startTime: Date.now(), apiBase };
       fs.writeFileSync(stateFile, JSON.stringify(state));
 
-      // Clear action log for fresh recording
+      // Clear action log
       try { fs.unlinkSync(ACTION_LOG); } catch {}
 
-      // Capture loop: hit bridge URL directly (server can't see child instance tabs)
-      const recordInstUrl = await getInstanceUrl(instId) || pinchtabApi;
+      // Capture loop script — hits /screenshot endpoint
       const captureScript = `
 const http = require('http');
 const fs = require('fs');
 const framesDir = ${JSON.stringify(framesDir)};
 const stateFile = ${JSON.stringify(stateFile)};
-const tabId = ${JSON.stringify(tabId)};
-const api = ${JSON.stringify(recordInstUrl)};
-const token = ${JSON.stringify(pinchtabToken)};
+const api = ${JSON.stringify(apiBase)};
 const fps = ${fps};
 const maxFrames = ${duration} * fps;
 let frame = 0;
 
 function grabFrame() {
   return new Promise((resolve) => {
-    const url = new URL('/screenshot?tabId=' + tabId + '&quality=80&raw=true', api);
-    const opts = { headers: token ? { 'Authorization': 'Bearer ' + token } : {}, timeout: 500 };
-    const req = http.get(url, opts, (res) => {
-      const chunks = [];
-      res.on('data', (c) => chunks.push(c));
+    const url = new URL('/screenshot', api);
+    const req = http.get(url, { timeout: 2000 }, (res) => {
+      let data = '';
+      res.on('data', (c) => data += c);
       res.on('end', () => {
-        const raw = Buffer.concat(chunks);
-        let img;
         try {
-          const j = JSON.parse(raw.toString('utf8'));
-          img = Buffer.from(j.base64 || j.data || '', 'base64');
-        } catch (e) { img = raw; }
-        const name = 'frame-' + String(frame).padStart(6, '0') + '.jpg';
-        fs.writeFileSync(framesDir + '/' + name, img);
-        frame++;
-        try {
-          const s = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-          s.frames = frame;
-          fs.writeFileSync(stateFile, JSON.stringify(s));
-        } catch (e2) {}
+          const j = JSON.parse(data);
+          if (j.base64) {
+            const img = Buffer.from(j.base64, 'base64');
+            const name = 'frame-' + String(frame).padStart(6, '0') + '.png';
+            fs.writeFileSync(framesDir + '/' + name, img);
+            frame++;
+            try {
+              const s = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+              s.frames = frame;
+              fs.writeFileSync(stateFile, JSON.stringify(s));
+            } catch {}
+          }
+        } catch {}
         resolve();
       });
     }).on('error', () => resolve());
@@ -1122,26 +861,24 @@ function grabFrame() {
 }
 
 async function run() {
-  console.log('Capture started: ' + maxFrames + ' max frames at ' + fps + 'fps');
-  console.log('Tab: ' + tabId + ', API: ' + api);
   const interval = 1000 / fps;
   while (frame < maxFrames) {
     const t0 = Date.now();
-    try { await grabFrame(); } catch (e) { console.error('Frame ' + frame + ' error:', e.message); }
+    try { await grabFrame(); } catch {}
     const elapsed = Date.now() - t0;
     const wait = Math.max(0, interval - elapsed);
     if (wait > 0) await new Promise(r => setTimeout(r, wait));
     try {
       const s = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
       if (!s.active) break;
-    } catch (e3) { break; }
+    } catch { break; }
   }
   try {
     const s = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
     s.active = false;
     s.frames = frame;
     fs.writeFileSync(stateFile, JSON.stringify(s));
-  } catch (e4) {}
+  } catch {}
 }
 run();
 `;
@@ -1159,7 +896,7 @@ run();
       child.unref();
       fs.writeFileSync(PIDFILE_RECORD, String(child.pid));
 
-      return `Recording started (PinchTab screenshots at ${fps}fps, max ${duration}s).\nFrames dir: ${framesDir}\nUse navvi_record_stop to finish and assemble video.`;
+      return `Recording started (${fps}fps, max ${duration}s).\nFrames dir: ${framesDir}\nUse navvi_record_stop to finish.`;
     }
 
     case 'navvi_record_stop': {
@@ -1167,8 +904,6 @@ run();
       if (!fs.existsSync(stateFile)) return 'No active recording found.';
 
       const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-
-      // Signal the capture loop to stop
       state.active = false;
       fs.writeFileSync(stateFile, JSON.stringify(state));
 
@@ -1181,9 +916,8 @@ run();
         try { fs.unlinkSync(PIDFILE_RECORD); } catch {}
       }
 
-      await new Promise((r) => setTimeout(r, 1000)); // let last frame flush
+      await new Promise(r => setTimeout(r, 1000));
 
-      // Re-read final state
       const finalState = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
       const { framesDir, fps, frames, ts } = finalState;
 
@@ -1192,35 +926,30 @@ run();
         return 'Recording stopped but no frames were captured.';
       }
 
-      // Assemble frames into MP4 with ffmpeg
-      // Use concat demuxer instead of %06d pattern — tolerates gaps in sequence
+      // Assemble frames into MP4
       const ffmpegBin = which('ffmpeg') || '/usr/local/bin/ffmpeg';
       const outputFile = path.join(RECORDINGS_DIR, `${ts}.mp4`);
-      const frameFiles = fs.readdirSync(framesDir).filter(f => f.endsWith('.jpg')).sort();
+      const frameFiles = fs.readdirSync(framesDir).filter(f => f.endsWith('.png')).sort();
       const concatFile = path.join(framesDir, 'concat.txt');
       const concatLines = frameFiles.map(f => `file '${path.join(framesDir, f)}'\nduration ${(1/fps).toFixed(4)}`);
-      // Add last file again without duration (ffmpeg concat requirement)
       if (frameFiles.length > 0) concatLines.push(`file '${path.join(framesDir, frameFiles[frameFiles.length - 1])}'`);
       fs.writeFileSync(concatFile, concatLines.join('\n') + '\n');
       const assembleResult = sh(`"${ffmpegBin}" -y -f concat -safe 0 -i "${concatFile}" -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" -c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p "${outputFile}" 2>&1`);
 
       if (!fs.existsSync(outputFile)) {
-        // Clean up on failure
         try {
           for (const f of fs.readdirSync(framesDir)) fs.unlinkSync(path.join(framesDir, f));
           fs.rmdirSync(framesDir);
         } catch {}
         try { fs.unlinkSync(stateFile); } catch {}
-        const logGlob = fs.readdirSync(RECORDINGS_DIR).filter(f => f.startsWith('capture-') && f.endsWith('.log'));
-        const logHint = logGlob.length > 0 ? `\nCapture log: ${path.join(RECORDINGS_DIR, logGlob[logGlob.length - 1])}` : '';
-        return `Failed to assemble video.\n${assembleResult}${logHint}`;
+        return `Failed to assemble video.\n${assembleResult}`;
       }
 
       const sizeKB = Math.round(fs.statSync(outputFile).size / 1024);
       const durationSec = (frames / fps).toFixed(1);
       let result = `Recording stopped.\nFile: ${outputFile}\nFrames: ${frames} at ${fps}fps\nDuration: ${durationSec}s\nSize: ${sizeKB}KB`;
 
-      // --- Smart trim: cut dead time between actions ---
+      // Smart trim
       const shouldTrim = args.trim !== false;
       if (shouldTrim && fs.existsSync(ACTION_LOG)) {
         try {
@@ -1230,11 +959,6 @@ run();
           if (actions.length > 0 && frameFiles.length > 0) {
             const recordingStart = finalState.startTime;
             const frameDurationMs = 1000 / fps;
-
-            // For each action, compute which frames to keep:
-            // 1s before action → action → N seconds after
-            // fill actions: keep for their full typing duration + 2s after
-            // other actions: keep 3s after (enough for page response)
             const BEFORE_MS = 1000;
             const AFTER_MS = 3000;
             const keepFrames = new Set();
@@ -1242,21 +966,17 @@ run();
             for (const action of actions) {
               const actionOffsetMs = action.ts - recordingStart;
               const actionFrame = Math.floor(actionOffsetMs / frameDurationMs);
-
               const beforeFrames = Math.ceil(BEFORE_MS / frameDurationMs);
-              // For fill, extend after by typing duration
               let afterMs = AFTER_MS;
               if (action.action === 'fill' && action.detail && action.detail.durationMs) {
                 afterMs = action.detail.durationMs + AFTER_MS;
               }
               const afterFrames = Math.ceil(afterMs / frameDurationMs);
-
               const start = Math.max(0, actionFrame - beforeFrames);
               const end = Math.min(frameFiles.length - 1, actionFrame + afterFrames);
               for (let i = start; i <= end; i++) keepFrames.add(i);
             }
 
-            // Only trim if we're actually cutting something (at least 20% reduction)
             if (keepFrames.size < frameFiles.length * 0.8) {
               const trimmedFrames = frameFiles.filter((_, i) => keepFrames.has(i));
               const trimConcatFile = path.join(framesDir, 'concat-trimmed.txt');
@@ -1270,10 +990,10 @@ run();
               if (fs.existsSync(trimmedFile)) {
                 const trimSizeKB = Math.round(fs.statSync(trimmedFile).size / 1024);
                 const trimDurationSec = (trimmedFrames.length / fps).toFixed(1);
-                result += `\n\nTrimmed: ${trimmedFile}\nFrames: ${trimmedFrames.length} at ${fps}fps\nDuration: ${trimDurationSec}s\nSize: ${trimSizeKB}KB`;
+                result += `\n\nTrimmed: ${trimmedFile}\nDuration: ${trimDurationSec}s (${trimSizeKB}KB)`;
               }
             } else {
-              result += '\n\n(Trim skipped — not enough dead time to cut.)';
+              result += '\n\n(Trim skipped — not enough dead time.)';
             }
           }
         } catch (trimErr) {
@@ -1282,7 +1002,7 @@ run();
         try { fs.unlinkSync(ACTION_LOG); } catch {}
       }
 
-      // Clean up frames dir
+      // Clean up frames
       try {
         for (const f of fs.readdirSync(framesDir)) fs.unlinkSync(path.join(framesDir, f));
         fs.rmdirSync(framesDir);
@@ -1298,10 +1018,9 @@ run();
 
       let input = args.input;
       if (!input) {
-        // Find most recent recording
         if (!fs.existsSync(RECORDINGS_DIR)) return 'No recordings directory found.';
         const files = fs.readdirSync(RECORDINGS_DIR)
-          .filter((f) => f.match(/\.(mp4|mov)$/))
+          .filter(f => f.match(/\.(mp4|mov)$/))
           .sort()
           .reverse();
         if (files.length === 0) return 'No recordings found.';
@@ -1313,18 +1032,17 @@ run();
       const output = input.replace(/\.(mp4|mov)$/, '.gif');
       const palette = path.join(os.tmpdir(), '.navvi-palette.png');
 
-      // Two-pass GIF: palette generation + application
       const pass1 = sh(`ffmpeg -y -i "${input}" -vf "fps=8,scale=1600:-1:flags=lanczos,palettegen" "${palette}" 2>&1`);
       if (!fs.existsSync(palette)) return `GIF palette generation failed.\n${pass1}`;
 
-      const pass2 = sh(`ffmpeg -y -i "${input}" -i "${palette}" -lavfi "fps=8,scale=1600:-1:flags=lanczos [x]; [x][1:v] paletteuse" "${output}" 2>&1`);
+      sh(`ffmpeg -y -i "${input}" -i "${palette}" -lavfi "fps=8,scale=1600:-1:flags=lanczos [x]; [x][1:v] paletteuse" "${output}" 2>&1`);
 
       try { fs.unlinkSync(palette); } catch {}
 
-      if (!fs.existsSync(output)) return `GIF conversion failed.\n${pass2}`;
+      if (!fs.existsSync(output)) return 'GIF conversion failed.';
 
       const sizeKB = Math.round(fs.statSync(output).size / 1024);
-      return `GIF created: ${output} (${sizeKB}KB)\n\nDo NOT use Read on this file. Send it via Telegram sendDocument or upload to S3.`;
+      return `GIF created: ${output} (${sizeKB}KB)\n\nDo NOT use Read on this file.`;
     }
 
     default:
@@ -1364,7 +1082,7 @@ async function handleMessage(msg) {
         result: {
           protocolVersion: '2024-11-05',
           capabilities: { tools: {} },
-          serverInfo: { name: 'navvi', version: '0.5.0' },
+          serverInfo: { name: 'navvi', version: '2.0.0' },
         },
       });
       break;
@@ -1404,8 +1122,7 @@ async function handleMessage(msg) {
 
 // Cleanup on exit
 process.on('exit', () => {
-  killPidfile(PIDFILE_LOCAL);
   killPidfile(PIDFILE_FWD);
 });
 
-process.stderr.write('Navvi MCP server started (v0.5.0)\n');
+process.stderr.write('Navvi MCP server started (v2.0.0)\n');
