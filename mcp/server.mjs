@@ -394,18 +394,19 @@ const TOOLS = [
   },
   {
     name: 'navvi_drag',
-    description: 'Drag an element by (dx, dy) pixels. Three strategies: "mouse" (CDP mouse events — sliders, canvas, CAPTCHAs), "html5" (synthetic HTML5 DnD events — Sortable.js, react-dnd, native DnD), "auto" (try mouse first, fall back to html5). For coordinate-based dragging without element ref, use navvi_mousedown + navvi_mousemove + navvi_mouseup instead.',
+    description: 'Drag an element or coordinate by (dx, dy) pixels. Supports ref OR x,y as the drag origin. Three strategies: "mouse" (CDP mouse events with interpolated path — sliders, canvas, CAPTCHAs), "html5" (synthetic HTML5 DnD events — Sortable.js, react-dnd, native DnD), "auto" (try mouse first, fall back to html5). Use x,y for elements inside iframes or not in the accessibility tree (take a screenshot first to identify coordinates).',
     inputSchema: {
       type: 'object',
       properties: {
-        ref: { type: 'string', description: 'Element ref to drag (from navvi_inspect JSONL).' },
+        ref: { type: 'string', description: 'Element ref to drag (from navvi_inspect JSONL). Omit when using x,y.' },
+        x: { type: 'number', description: 'X coordinate of drag start (pixels from left). Use with y instead of ref.' },
+        y: { type: 'number', description: 'Y coordinate of drag start (pixels from top). Use with x instead of ref.' },
         targetRef: { type: 'string', description: 'Drop target element ref (for html5 strategy). If omitted, uses dragX/dragY offsets.' },
         dragX: { type: 'number', description: 'Horizontal pixels to drag (positive = right, negative = left).' },
         dragY: { type: 'number', description: 'Vertical pixels to drag (positive = down, negative = up).' },
         strategy: { type: 'string', enum: ['auto', 'mouse', 'html5'], description: 'Drag strategy (default: auto). "mouse" = CDP mouse events, "html5" = synthetic DnD events, "auto" = try mouse then html5.' },
         persona: { type: 'string', description: 'Target persona (optional — uses last launched if omitted)' },
       },
-      required: ['ref'],
     },
   },
   {
@@ -850,7 +851,8 @@ async function handleTool(name, args) {
       if (!instId) return 'Error: no running instance.';
       const tabId = await getFirstTab(instId);
       if (!tabId) return 'Error: no open tab.';
-      if (!args.ref) return 'Error: ref is required for drag.';
+      const hasXY = args.x !== undefined && args.y !== undefined;
+      if (!args.ref && !hasXY) return 'Error: provide either ref or x,y coordinates for drag.';
       const strategy = args.strategy || 'auto';
       const dx = args.dragX || 0;
       const dy = args.dragY || 0;
@@ -879,7 +881,11 @@ async function handleTool(name, args) {
       // Mouse strategy: CDP mouse events (sliders, canvas, CAPTCHAs)
       async function tryMouse() {
         if (dx === 0 && dy === 0) return { ok: false, reason: 'dragX or dragY required for mouse strategy' };
-        await apiCall('POST', `/tabs/${tabId}/action`, { type: 'mouse', kind: 'drag', ref: args.ref, dragX: dx, dragY: dy });
+        if (hasXY) {
+          await apiCall('POST', `/tabs/${tabId}/action`, { type: 'mouse', kind: 'drag', x: args.x, y: args.y, hasXY: true, dragX: dx, dragY: dy });
+        } else {
+          await apiCall('POST', `/tabs/${tabId}/action`, { type: 'mouse', kind: 'drag', ref: args.ref, dragX: dx, dragY: dy });
+        }
         return { ok: true, strategy: 'mouse' };
       }
 
@@ -896,15 +902,17 @@ async function handleTool(name, args) {
         return { ok: true, strategy: 'html5' };
       }
 
-      logAction('drag', { ref: args.ref, dx, dy, strategy, targetRef: args.targetRef });
+      const source = hasXY ? `(${args.x}, ${args.y})` : args.ref;
+      logAction('drag', { source, dx, dy, strategy, targetRef: args.targetRef });
 
       if (strategy === 'mouse') {
         const result = await tryMouse();
         if (!result.ok) return `Error: ${result.reason}`;
-        return `Dragged ${args.ref} by (${dx}, ${dy}) [mouse]`;
+        return `Dragged ${source} by (${dx}, ${dy}) [mouse]`;
       }
 
       if (strategy === 'html5') {
+        if (hasXY) return 'Error: html5 strategy requires ref, not x/y coordinates.';
         const result = await tryHTML5();
         if (!result.ok) return `Error: ${result.reason}`;
         return `Dragged ${args.ref} to ${args.targetRef} [html5]`;
@@ -916,20 +924,20 @@ async function handleTool(name, args) {
       if (mouseResult.ok) {
         const afterState = await getElementOrder();
         if (afterState !== beforeState) {
-          return `Dragged ${args.ref} by (${dx}, ${dy}) [mouse]`;
+          return `Dragged ${source} by (${dx}, ${dy}) [mouse]`;
         }
         // Mouse didn't change DOM — try html5 if targetRef is available
-        if (args.targetRef) {
+        if (args.targetRef && args.ref) {
           const html5Result = await tryHTML5().catch(e => ({ ok: false, reason: e.message }));
           if (html5Result.ok) {
             return `Dragged ${args.ref} to ${args.targetRef} [html5, mouse had no effect]`;
           }
           return `Warning: both strategies attempted. Mouse had no visible effect, html5 failed: ${html5Result.reason}`;
         }
-        return `Dragged ${args.ref} by (${dx}, ${dy}) [mouse] — no DOM change detected (may need targetRef for html5 fallback)`;
+        return `Dragged ${source} by (${dx}, ${dy}) [mouse] — no DOM change detected (may need targetRef for html5 fallback)`;
       }
       // Mouse failed entirely
-      if (args.targetRef) {
+      if (args.targetRef && args.ref) {
         const html5Result = await tryHTML5().catch(e => ({ ok: false, reason: e.message }));
         if (html5Result.ok) {
           return `Dragged ${args.ref} to ${args.targetRef} [html5, mouse failed: ${mouseResult.reason}]`;
