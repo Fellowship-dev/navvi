@@ -1,6 +1,6 @@
 {
   "name": "navvi",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Give your AI agent a real browser identity",
   "type": "module",
   "main": "mcp/server.mjs",
