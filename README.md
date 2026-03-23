@@ -1,124 +1,169 @@
-# Navvi v2
+<p align="center">
+  <img src="docs/navvi-logo.svg" alt="Navvi" width="120" />
+</p>
 
-Give your AI agent a real browser identity.
+<h1 align="center">Navvi</h1>
 
-Persistent browser personas powered by Xvfb + Firefox + xdotool. OS-level input produces `isTrusted: true` events — undetectable by bot detection. Firefox profiles persist across sessions via Docker volumes.
+<p align="center">
+  <strong>Give your AI agent a real browser identity.</strong>
+  <br />
+  Persistent browser personas that don't get blocked.
+</p>
 
-## Architecture
+<p align="center">
+  <a href="#quick-start">Quick Start</a> &middot;
+  <a href="#use-cases">Use Cases</a> &middot;
+  <a href="#how-it-works">How It Works</a> &middot;
+  <a href="#mcp-tools">MCP Tools</a>
+</p>
 
-```
-MCP server (server.mjs, Node.js)
-  ↓ HTTP calls to localhost:8024
-Docker container
-  ├── Xvfb :1 (virtual display, 1024x768)
-  ├── Firefox ESR (--marionette, persistent profile)
-  ├── navvi-server.py (FastAPI on :8024)
-  │   ├── xdotool (click, type, mousedown/up, drag)
-  │   ├── scrot (screenshots)
-  │   └── marionette.py (navigate, getURL, getTitle, executeJS)
-  ├── x11vnc + noVNC (:6080, live view)
-  └── Volume: /home/user/.mozilla (persistent Firefox profile)
-```
+---
+
+## The Problem
+
+AI agents need to use the web. But every automation tool gets detected and blocked:
+
+- Selenium, Playwright, Puppeteer &rarr; `navigator.webdriver = true`
+- Chrome DevTools Protocol &rarr; detectable protocol markers
+- Synthetic events &rarr; `isTrusted: false`
+
+Even "stealth" plugins get flagged by modern bot detection (Arkose Labs, Cloudflare Turnstile, PerimeterX). Your agent can't sign up for accounts, can't fill out forms on protected sites, can't pass CAPTCHAs.
+
+## The Solution
+
+Navvi gives your agent a real browser with real input. No protocol tricks, no stealth patches &mdash; just a Firefox window controlled by OS-level mouse and keyboard, exactly like a human sitting at a desk.
+
+- **Real mouse events** that websites cannot distinguish from a person
+- **Persistent identities** &mdash; cookies, logins, and history survive across sessions
+- **Live view** &mdash; connect via VNC when your agent needs human help (CAPTCHAs, OAuth)
+- **20 MCP tools** &mdash; drop into any Claude Code project
+
+## Use Cases
+
+**Account creation for AI personas.** Sign up for email, dev platforms, social accounts. Fill every form field, handle dropdowns and date pickers, get all the way to the CAPTCHA step undetected.
+
+**Visual evidence for pull requests.** Screenshot your staging app before and after a code change. Record a GIF of a user flow. Attach it to the PR automatically.
+
+**OAuth and login flows.** Log into a service once via VNC, and the session persists in a named volume. Your agent reuses the authenticated browser on every future run.
+
+**Web scraping on protected sites.** Navigate sites that block headless browsers. Your agent sees a real Firefox with a real fingerprint.
+
+**QA and smoke testing.** Point your agent at a form-heavy app and let it click through every flow, filling fields and verifying results.
 
 ## Quick Start
 
 ```bash
-# Build the Docker image
+# 1. Build
 docker build -t navvi container/
 
-# Start a persona
-./scripts/navvi.sh start default
+# 2. Start
+docker run -d --name navvi-default \
+  -p 8024:8024 -p 6080:6080 \
+  -v navvi-profile-default:/home/user/.mozilla \
+  navvi
 
-# Or via MCP tools
-# navvi_start persona=default mode=local
-# navvi_open url=https://example.com
-# navvi_screenshot
+# 3. Use (via MCP, CLI, or HTTP)
+curl -X POST localhost:8024/navigate -d '{"url":"https://example.com"}'
+curl -X POST localhost:8024/find -d '{"selector":"a"}'
+curl localhost:8024/screenshot | jq -r .base64 | base64 -d > shot.png
 ```
 
-## Structure
+Or with Claude Code:
 
 ```
-container/
-├── Dockerfile           # Ubuntu + Firefox + Xvfb + xdotool + FastAPI
-├── start.sh             # Entrypoint: start all services
-├── navvi-server.py      # REST API for automation
-├── marionette.py        # Firefox Marionette TCP client
-└── requirements.txt     # fastapi, uvicorn
-mcp/
-├── server.mjs           # MCP server (Docker lifecycle + tool handlers)
-└── mcp.json             # MCP config
-personas/
-└── default.yaml         # Template persona
-scripts/
-└── navvi.sh             # CLI wrapper
-.devcontainer/
-└── devcontainer.json    # Codespace config
+navvi_start persona=default
+navvi_open url=https://example.com
+navvi_find selector="input[type=email]"
+navvi_fill x=512 y=498 value="hello@example.com"
+navvi_screenshot
 ```
 
-## API Endpoints (navvi-server.py)
-
-| Endpoint | Method | Backend |
-|---|---|---|
-| `/health` | GET | Check Firefox + Xvfb alive |
-| `/navigate` | POST `{url}` | Marionette |
-| `/url` | GET | Marionette |
-| `/title` | GET | Marionette |
-| `/click` | POST `{x, y}` | xdotool |
-| `/type` | POST `{text, delay}` | xdotool |
-| `/key` | POST `{key}` | xdotool |
-| `/mousedown` | POST `{x, y}` | xdotool |
-| `/mouseup` | POST `{x, y}` | xdotool |
-| `/mousemove` | POST `{x, y}` | xdotool |
-| `/drag` | POST `{x1, y1, x2, y2}` | xdotool |
-| `/scroll` | POST `{direction, amount}` | xdotool |
-| `/screenshot` | GET | scrot → base64 PNG |
-| `/cursor` | GET | xdotool |
-| `/execute` | POST `{script}` | Marionette |
-| `/find` | POST `{selector, all?}` | Marionette + viewport offset correction |
-| `/viewport` | GET | viewport offset (screen vs JS coords) |
-
-## MCP Tools (20 total)
-
-**Lifecycle:** `navvi_start`, `navvi_stop`, `navvi_status`, `navvi_list`
-
-**Browser:** `navvi_open`, `navvi_find`, `navvi_click`, `navvi_fill`, `navvi_press`, `navvi_drag`, `navvi_mousedown`, `navvi_mouseup`, `navvi_mousemove`, `navvi_scroll`, `navvi_screenshot`, `navvi_url`, `navvi_vnc`
-
-**Recording:** `navvi_record_start`, `navvi_record_stop`, `navvi_record_gif`
-
-## Workflow (important!)
+## How It Works
 
 ```
-navvi_start → navvi_open(url) → navvi_find(selector) → navvi_click/navvi_fill(x, y) → navvi_screenshot (verify)
+Your AI agent (Claude Code, etc.)
+    |
+    | MCP tools / HTTP API
+    v
++--------------------------------------+
+|  Docker container                    |
+|                                      |
+|  Firefox  <-- Marionette (navigate)  |
+|     |                                |
+|  Xvfb    <-- xdotool (click, type)  |
+|     |                                |
+|  x11vnc  --> noVNC (live view)       |
+|                                      |
+|  navvi-server (REST API on :8024)    |
++--------------------------------------+
+    |
+    v
+  Volume: persistent Firefox profile
 ```
 
-**Always use `navvi_find` to get coordinates.** It returns screen-ready `(x, y)` values that account for the browser chrome offset (toolbar, notification bars). Do NOT use raw JS `getBoundingClientRect()` — those are viewport-relative and will be ~160px off vertically.
+**Navigation** goes through Firefox Marionette &mdash; a built-in protocol that doesn't expose automation markers.
 
-**For dropdowns/selects:**
-1. `navvi_find` the trigger button
-2. `navvi_click` to open
-3. `navvi_find` the options (`selector="[role=option]"`, `all=true`)
-4. `navvi_click` the desired option
+**All input** goes through xdotool &mdash; OS-level mouse and keyboard events that are indistinguishable from a real user.
 
-**For CAPTCHAs (press-and-hold):**
-1. `navvi_find` the challenge button/iframe
-2. `navvi_mousedown` at those coords
-3. Wait 3-7 seconds
-4. `navvi_mouseup` at same coords
+**Screenshots** are captured at the display level, not through the browser API.
 
-## Persona Persistence
+**Profiles persist** in Docker named volumes. Stop a container, start it again &mdash; you're still logged in.
 
-Firefox profiles are stored in Docker named volumes (`navvi-profile-<persona>`). Stop and restart a container — cookies, logins, and browsing history are preserved.
+## MCP Tools
 
-First-time login: use `navvi_vnc` to get the noVNC URL, log in manually via the browser, then the session persists.
+| Tool | What it does |
+|------|-------------|
+| `navvi_start` | Start a browser container for a persona |
+| `navvi_stop` | Stop container (profile preserved) |
+| `navvi_open` | Navigate to a URL |
+| `navvi_find` | Find element by CSS selector &rarr; screen coordinates |
+| `navvi_click` | Click at (x, y) |
+| `navvi_fill` | Click + type text into a field |
+| `navvi_press` | Press a key (Enter, Tab, Escape...) |
+| `navvi_scroll` | Scroll the page |
+| `navvi_drag` | Drag from point A to point B |
+| `navvi_mousedown` | Press and hold (for CAPTCHAs) |
+| `navvi_mouseup` | Release mouse button |
+| `navvi_screenshot` | Capture the screen |
+| `navvi_vnc` | Get live view URL for human help |
+| `navvi_url` | Get current page URL |
+| `navvi_record_start` | Start recording a video |
+| `navvi_record_stop` | Stop and assemble MP4 |
+| `navvi_record_gif` | Convert recording to GIF |
 
-## Why v2?
+### The Workflow
 
-v1 used PinchTab (Chrome/CDP). CDP is detectable — bot detection scripts check for `navigator.webdriver`, CDP protocol markers, and `isTrusted: false` events. v2 replaces all of this with:
+```
+navvi_find("input[type=email]")  -->  { x: 512, y: 498 }
+navvi_fill(x=512, y=498, value="me@example.com")
+navvi_screenshot()  -->  verify it worked
+```
 
-- **Firefox** instead of Chrome (no CDP detection vectors)
-- **xdotool** for all input (OS-level events, `isTrusted: true`)
-- **Marionette** for navigation only (no input, no detection surface)
-- **scrot** for screenshots (X11-level capture)
+`navvi_find` is the key tool. It finds elements by CSS selector and returns **screen-ready coordinates** that you pass directly to `navvi_click` or `navvi_fill`. No coordinate math required.
+
+### When Your Agent Gets Stuck
+
+Some CAPTCHAs (Arkose Labs, image puzzles) require human eyes. When that happens:
+
+```
+navvi_vnc()  -->  http://127.0.0.1:6080/vnc.html?autoconnect=true
+```
+
+Send the URL to the user. They solve the CAPTCHA in their browser, your agent continues.
+
+## Personas
+
+Define a persona in `personas/`:
+
+```yaml
+name: default
+description: Default browser persona
+browser:
+  locale: en-US
+  timezone: America/Santiago
+```
+
+Each persona gets its own Docker volume (`navvi-profile-<name>`). Start it, log into your services via VNC, and the session persists forever. Your agent reuses the authenticated browser every time.
 
 ## License
 
