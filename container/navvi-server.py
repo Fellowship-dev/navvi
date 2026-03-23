@@ -71,6 +71,15 @@ class FindRequest(BaseModel):
     selector: str
     all: bool = False  # return all matches vs just the first
 
+class CredsAutofillRequest(BaseModel):
+    entry: str  # gopass entry path, e.g. "navvi/default/tuta"
+    username_selector: str = "input[type=email], input[type=text], input[name*=user i], input[name*=email i], input[name*=login i]"
+    password_selector: str = "input[type=password]"
+
+class CredsGetRequest(BaseModel):
+    entry: str
+    field: str  # e.g. "username", "url", "email" — NOT "password"
+
 
 # --- Helpers ---
 
@@ -473,6 +482,138 @@ async def find_element(req: FindRequest):
             return {"ok": True, "found": True, **el}
     except MarionetteError as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- Credential management (gopass) ---
+
+def run_gopass(args: str, timeout: float = 5.0) -> str:
+    """Run a gopass command and return stdout."""
+    result = subprocess.run(
+        f"gopass {args}",
+        shell=True,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"gopass failed: {result.returncode}")
+    return result.stdout.strip()
+
+
+@app.get("/creds/list")
+async def creds_list():
+    """List all credential entries (names only, no secrets)."""
+    try:
+        output = run_gopass("ls --flat")
+        entries = [e for e in output.splitlines() if e.strip()]
+        return {"ok": True, "entries": entries, "count": len(entries)}
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/creds/get")
+async def creds_get(req: CredsGetRequest):
+    """Get a specific non-secret field from a gopass entry.
+
+    Returns metadata fields like username, url, email.
+    Refuses to return the password field — use /creds/autofill instead.
+    """
+    blocked = {"password", "pass", "secret", "token", "key", "recovery"}
+    if req.field.lower() in blocked:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Field '{req.field}' is a secret — use /creds/autofill to fill it into the browser without exposing it."
+        )
+    try:
+        value = run_gopass(f"show {shlex.quote(req.entry)} {shlex.quote(req.field)}")
+        return {"ok": True, "entry": req.entry, "field": req.field, "value": value}
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/creds/autofill")
+async def creds_autofill(req: CredsAutofillRequest):
+    """Autofill a login form using gopass credentials.
+
+    Reads username and password from gopass, finds the form fields
+    via CSS selectors, and types them using xdotool. The password
+    NEVER appears in the API response — it goes directly from
+    gopass → xdotool → browser.
+    """
+    try:
+        # Read credentials from gopass (server-side only, never returned)
+        username = run_gopass(f"show {shlex.quote(req.entry)} username")
+        password = run_gopass(f"show -o {shlex.quote(req.entry)}")
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=f"gopass error: {e}")
+
+    if not username or not password:
+        raise HTTPException(status_code=404, detail=f"Entry '{req.entry}' missing username or password")
+
+    # Find form fields
+    try:
+        m = get_marionette()
+        offset_x, offset_y = get_viewport_offset()
+
+        find_script = """
+            const el = document.querySelector(arguments[0]);
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            return {
+                x: Math.round(r.x + r.width / 2),
+                y: Math.round(r.y + r.height / 2),
+                visible: r.width > 0 && r.height > 0,
+            };
+        """
+        username_el = m.execute_script(find_script, [req.username_selector])
+        password_el = m.execute_script(find_script, [req.password_selector])
+
+        if not username_el or not username_el.get("visible"):
+            raise HTTPException(status_code=404, detail=f"Username field not found: {req.username_selector}")
+        if not password_el or not password_el.get("visible"):
+            raise HTTPException(status_code=404, detail=f"Password field not found: {req.password_selector}")
+
+        # Apply viewport offset
+        ux, uy = username_el["x"] + offset_x, username_el["y"] + offset_y
+        px, py = password_el["x"] + offset_x, password_el["y"] + offset_y
+    except MarionetteError as e:
+        raise HTTPException(status_code=500, detail=f"Browser error: {e}")
+
+    # Fill username
+    run_xdotool(f"mousemove --sync {ux} {uy}")
+    await asyncio.sleep(0.05)
+    run_xdotool("click 1")
+    await asyncio.sleep(0.1)
+    run_xdotool("key ctrl+a")
+    await asyncio.sleep(0.05)
+    safe_user = shlex.quote(username)
+    run_xdotool(f"type --delay 15 -- {safe_user}", timeout=15.0)
+
+    await asyncio.sleep(0.3)
+
+    # Fill password (never logged, never returned)
+    run_xdotool(f"mousemove --sync {px} {py}")
+    await asyncio.sleep(0.05)
+    run_xdotool("click 1")
+    await asyncio.sleep(0.1)
+    run_xdotool("key ctrl+a")
+    await asyncio.sleep(0.05)
+    safe_pass = shlex.quote(password)
+    run_xdotool(f"type --delay 15 -- {safe_pass}", timeout=15.0)
+
+    # Scrub password from memory
+    del password
+    del safe_pass
+
+    return {
+        "ok": True,
+        "entry": req.entry,
+        "username_filled": True,
+        "password_filled": True,
+        "username_at": [ux, uy],
+        "password_at": [px, py],
+        "note": "Password was typed directly into the browser — it never appeared in this response."
+    }
 
 
 # --- Startup ---

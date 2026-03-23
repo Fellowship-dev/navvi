@@ -71,6 +71,21 @@ function which(bin) {
   }
 }
 
+/** Run a gh CLI command with CODESPACE_TOKEN as GH_TOKEN */
+function ghSh(cmd) {
+  const token = process.env.CODESPACE_TOKEN;
+  if (!token) return sh(cmd);
+  try {
+    return execSync(cmd, {
+      encoding: 'utf8',
+      timeout: 60000,
+      env: { ...process.env, GH_TOKEN: token },
+    }).trim();
+  } catch (e) {
+    return e.stderr ? e.stderr.trim() : e.message;
+  }
+}
+
 function killPidfile(pidfile) {
   if (!fs.existsSync(pidfile)) return;
   try {
@@ -431,6 +446,23 @@ const TOOLS = [
       required: ['selector'],
     },
   },
+  // Credentials
+  {
+    name: 'navvi_creds',
+    description: 'Manage credentials stored in gopass inside the container. Three actions: "list" shows available entries (no secrets), "get" retrieves a non-secret field (username, url, email — refuses password), "autofill" reads gopass and fills the login form directly — the password goes from gopass → xdotool → browser, NEVER appearing in this response. Use autofill after navvi_open navigates to a login page.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['list', 'get', 'autofill'], description: 'Action: list entries, get a metadata field, or autofill a login form' },
+        entry: { type: 'string', description: 'Gopass entry path (e.g. "navvi/default/tuta"). Required for get and autofill.' },
+        field: { type: 'string', description: 'Field to retrieve (for "get" action). e.g. "username", "url", "email". Password fields are blocked — use autofill.' },
+        username_selector: { type: 'string', description: 'CSS selector for username field (autofill only, default: auto-detect)' },
+        password_selector: { type: 'string', description: 'CSS selector for password field (autofill only, default: input[type=password])' },
+        persona: { type: 'string', description: 'Target persona (optional)' },
+      },
+      required: ['action'],
+    },
+  },
   // Video recording
   {
     name: 'navvi_record_start',
@@ -558,14 +590,14 @@ async function handleTool(name, args) {
 
         let csName = args.name;
         if (csName) {
-          sh(`gh cs start -c ${csName}`);
+          ghSh(`gh cs start -c ${csName}`);
         } else {
-          const stopped = sh(`gh cs list --repo ${REPO} --json name,state -q '.[] | select(.state=="Shutdown") | .name'`);
+          const stopped = ghSh(`gh cs list --repo ${REPO} --json name,state -q '.[] | select(.state=="Shutdown") | .name'`);
           if (stopped) {
             csName = stopped.split('\n')[0];
-            sh(`gh cs start -c ${csName}`);
+            ghSh(`gh cs start -c ${csName}`);
           } else {
-            csName = sh(`gh cs create --repo ${REPO} --machine ${MACHINE_TYPE} --json name -q '.name'`);
+            csName = ghSh(`gh cs create --repo ${REPO} --machine ${MACHINE_TYPE} --json name -q '.name'`);
           }
         }
 
@@ -609,7 +641,7 @@ async function handleTool(name, args) {
         if (currentMode && currentMode.startsWith('remote:')) {
           const csName = currentMode.split(':')[1];
           killPidfile(PIDFILE_FWD);
-          if (csName) sh(`gh cs stop -c ${csName}`);
+          if (csName) ghSh(`gh cs stop -c ${csName}`);
           clearMode();
           return `Stopped remote Codespace ${csName}.`;
         }
@@ -653,7 +685,7 @@ async function handleTool(name, args) {
       const missing = checkRemoteDeps();
       if (missing.length > 0) return formatMissing(missing);
 
-      const output = sh(`gh cs list --repo ${REPO} --json name,state,createdAt,machine -q '.[] | "\\(.name)  \\(.state)  \\(.machine.displayName // "unknown")  \\(.createdAt)"'`);
+      const output = ghSh(`gh cs list --repo ${REPO} --json name,state,createdAt,machine -q '.[] | "\\(.name)  \\(.state)  \\(.machine.displayName // "unknown")  \\(.createdAt)"'`);
       if (!output) return `No Codespaces found for ${REPO}.`;
       return `Navvi Codespaces:\n${output}`;
     }
@@ -837,6 +869,52 @@ async function handleTool(name, args) {
       } catch (e) {
         return `Error: ${e.message}`;
       }
+    }
+
+    // --- Credentials ---
+
+    case 'navvi_creds': {
+      const { name: pName, apiBase } = resolvePersona(args.persona);
+      const action = args.action;
+
+      if (action === 'list') {
+        try {
+          const result = await apiCall('GET', '/creds/list', null, apiBase);
+          if (!result.entries || result.entries.length === 0) return 'No credentials stored in gopass. Use gopass to add entries.';
+          let output = `Credentials (${result.count} entries):\n`;
+          for (const e of result.entries) output += `  ${e}\n`;
+          return output;
+        } catch (e) {
+          return `Error: ${e.message}`;
+        }
+      }
+
+      if (action === 'get') {
+        if (!args.entry) return 'Error: "entry" is required for get action.';
+        if (!args.field) return 'Error: "field" is required for get action (e.g. "username", "url", "email").';
+        try {
+          const result = await apiCall('POST', '/creds/get', { entry: args.entry, field: args.field }, apiBase);
+          return `${args.field}: ${result.value}`;
+        } catch (e) {
+          return `Error: ${e.message}`;
+        }
+      }
+
+      if (action === 'autofill') {
+        if (!args.entry) return 'Error: "entry" is required for autofill action.';
+        logAction('autofill', args.entry);
+        try {
+          const params = { entry: args.entry };
+          if (args.username_selector) params.username_selector = args.username_selector;
+          if (args.password_selector) params.password_selector = args.password_selector;
+          const result = await apiCall('POST', '/creds/autofill', params, apiBase);
+          return `Autofill complete for "${args.entry}".\nUsername filled at (${result.username_at.join(', ')})\nPassword filled at (${result.password_at.join(', ')})\n\n${result.note}`;
+        } catch (e) {
+          return `Error: ${e.message}`;
+        }
+      }
+
+      return 'Error: action must be "list", "get", or "autofill".';
     }
 
     // --- Video recording ---
