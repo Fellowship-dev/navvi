@@ -215,7 +215,7 @@ async def get_title():
 @app.post("/click")
 async def click(req: ClickRequest):
     """Click at (x, y) using xdotool."""
-    run_xdotool(f"mousemove {req.x} {req.y}")
+    run_xdotool(f"mousemove --sync {req.x} {req.y}")
     await asyncio.sleep(0.05)
     run_xdotool("click 1")
     return {"ok": True, "x": req.x, "y": req.y}
@@ -245,7 +245,7 @@ async def press_key(req: KeyRequest):
 @app.post("/mousedown")
 async def mousedown(req: MouseRequest):
     """Move to (x, y) and press mouse button down."""
-    run_xdotool(f"mousemove {req.x} {req.y}")
+    run_xdotool(f"mousemove --sync {req.x} {req.y}")
     await asyncio.sleep(0.05)
     run_xdotool("mousedown 1")
     return {"ok": True, "x": req.x, "y": req.y}
@@ -254,7 +254,7 @@ async def mousedown(req: MouseRequest):
 @app.post("/mouseup")
 async def mouseup(req: MouseRequest):
     """Move to (x, y) and release mouse button."""
-    run_xdotool(f"mousemove {req.x} {req.y}")
+    run_xdotool(f"mousemove --sync {req.x} {req.y}")
     await asyncio.sleep(0.05)
     run_xdotool("mouseup 1")
     return {"ok": True, "x": req.x, "y": req.y}
@@ -263,7 +263,7 @@ async def mouseup(req: MouseRequest):
 @app.post("/mousemove")
 async def mousemove(req: MouseRequest):
     """Move mouse to (x, y)."""
-    run_xdotool(f"mousemove {req.x} {req.y}")
+    run_xdotool(f"mousemove --sync {req.x} {req.y}")
     return {"ok": True, "x": req.x, "y": req.y}
 
 
@@ -274,7 +274,7 @@ async def drag(req: DragRequest):
     step_delay = req.duration / steps
 
     # Move to start and press
-    run_xdotool(f"mousemove {req.x1} {req.y1}")
+    run_xdotool(f"mousemove --sync {req.x1} {req.y1}")
     await asyncio.sleep(0.05)
     run_xdotool("mousedown 1")
     await asyncio.sleep(0.05)
@@ -284,7 +284,7 @@ async def drag(req: DragRequest):
         t = i / steps
         cx = int(req.x1 + (req.x2 - req.x1) * t)
         cy = int(req.y1 + (req.y2 - req.y1) * t)
-        run_xdotool(f"mousemove {cx} {cy}")
+        run_xdotool(f"mousemove --sync {cx} {cy}")
         await asyncio.sleep(step_delay)
 
     # Release
