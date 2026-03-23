@@ -1,0 +1,41 @@
+{
+  "name": "navvi",
+  "version": "2.0.0",
+  "description": "Give your AI agent a real browser identity",
+  "type": "module",
+  "main": "mcp/server.mjs",
+  "bin": {
+    "navvi": "bin/navvi.js"
+  },
+  "files": [
+    "bin/",
+    "mcp/server.mjs",
+    "container/",
+    "personas/",
+    "docs/navvi-logo.png",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "browser",
+    "automation",
+    "ai",
+    "agent",
+    "persona",
+    "firefox",
+    "claude",
+    "anthropic"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Fellowship-dev/navvi"
+  },
+  "homepage": "https://github.com/Fellowship-dev/navvi#readme",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "docker build -t navvi container/"
+  }
+}

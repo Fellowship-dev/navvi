@@ -1,0 +1,11 @@
+.devcontainer/
+.navvi/
+.git/
+.gitignore
+scripts/
+docs/captchas.md
+docs/credentials.md
+mcp/mcp.json
+mcp/README.md
+personas/fry.yaml
+personas/dev.yaml

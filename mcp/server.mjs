@@ -24,7 +24,9 @@ import os from 'os';
 
 // --- Constants ---
 
-const REPO = process.env.NAVVI_REPO || 'Fellowship-dev/navvi';
+// Package directory — set by bin/navvi.js or inferred from this file's location
+const PACKAGE_DIR = process.env.NAVVI_PACKAGE_DIR || (import.meta.dirname ? path.resolve(import.meta.dirname, '..') : process.cwd());
+const REPO = process.env.NAVVI_REPO || null;
 const MACHINE_TYPE = process.env.NAVVI_MACHINE || 'basicLinux32gb';
 const NAVVI_PORT = 8024;
 const VNC_PORT = 6080;
@@ -131,6 +133,8 @@ function readPersonaYaml(persona) {
   const dirs = [
     path.join(process.cwd(), 'personas'),
     path.join(process.cwd(), '.navvi', 'personas'),
+    path.join(os.homedir(), '.navvi', 'personas'),
+    path.join(PACKAGE_DIR, 'personas'),
   ];
   for (const dir of dirs) {
     for (const ext of ['.yaml', '.yml']) {
@@ -585,6 +589,7 @@ async function handleTool(name, args) {
       }
 
       if (mode === 'remote') {
+        if (!REPO) return 'Error: remote mode requires NAVVI_REPO env var (e.g. "Fellowship-dev/navvi"). Set it in your MCP config.';
         const missing = checkRemoteDeps();
         if (missing.length > 0) return formatMissing(missing);
 

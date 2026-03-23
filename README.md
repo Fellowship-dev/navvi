@@ -53,30 +53,39 @@ Navvi gives your agent a real browser with real input. No protocol tricks, no st
 ## Quick Start
 
 ```bash
-# 1. Build
+# Install
+npm install -g navvi
+
+# Build the Docker image (one-time)
+navvi build
+
+# Add to Claude Code — in your .mcp.json:
+# { "mcpServers": { "navvi": { "command": "navvi" } } }
+```
+
+Or skip the install: `"command": "npx", "args": ["-y", "navvi"]`
+
+Your agent now has 21 browser tools. The workflow:
+
+```
+navvi_start                                    # spin up a browser container
+navvi_open url=https://example.com             # navigate
+navvi_find selector="input[type=email]"        # find element → get (x, y)
+navvi_fill x=512 y=498 value="me@example.com"  # type into it
+navvi_screenshot                               # verify visually
+navvi_creds action=autofill entry=navvi/default/tuta  # or autofill from gopass
+```
+
+<details>
+<summary>Manual Docker setup (no npm)</summary>
+
+```bash
+git clone https://github.com/Fellowship-dev/navvi
+cd navvi
 docker build -t navvi container/
-
-# 2. Start
-docker run -d --name navvi-default \
-  -p 8024:8024 -p 6080:6080 \
-  -v navvi-profile-default:/home/user/.mozilla \
-  navvi
-
-# 3. Use (via MCP, CLI, or HTTP)
-curl -X POST localhost:8024/navigate -d '{"url":"https://example.com"}'
-curl -X POST localhost:8024/find -d '{"selector":"a"}'
-curl localhost:8024/screenshot | jq -r .base64 | base64 -d > shot.png
+docker run -d --name navvi-default -p 8024:8024 -p 6080:6080 navvi
 ```
-
-Or with Claude Code:
-
-```
-navvi_start persona=default
-navvi_open url=https://example.com
-navvi_find selector="input[type=email]"
-navvi_fill x=512 y=498 value="hello@example.com"
-navvi_screenshot
-```
+</details>
 
 ## How It Works
 
