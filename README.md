@@ -7,10 +7,11 @@
 <p align="center">
   <strong>Give your AI agent a real browser identity.</strong>
   <br />
-  Persistent browser personas that don't get blocked.
+  Persistent browser personas that remember logins, manage credentials, and never get detected.
 </p>
 
 <p align="center">
+  <a href="https://www.npmjs.com/package/navvi"><img src="https://img.shields.io/npm/v/navvi" alt="npm" /></a>
   <a href="#quick-start">Quick Start</a> &middot;
   <a href="#use-cases">Use Cases</a> &middot;
   <a href="#how-it-works">How It Works</a> &middot;
@@ -21,102 +22,128 @@
 
 ## The Problem
 
-AI agents need to use the web. But every automation tool gets detected and blocked:
+Every time your AI agent needs to use the web, it starts from scratch. No cookies, no saved passwords, no history. It has to log in again and again &mdash; and half the time the automation gets detected and blocked.
 
-- Selenium, Playwright, Puppeteer &rarr; `navigator.webdriver = true`
-- Chrome DevTools Protocol &rarr; detectable protocol markers
-- Synthetic events &rarr; `isTrusted: false`
+- Agent fills a login form &rarr; site detects Selenium/Playwright &rarr; blocked
+- Agent stores a password in a variable &rarr; session ends &rarr; password gone
+- Agent tries to reuse a browser &rarr; cookies wiped &rarr; logged out again
+- You paste credentials into the chat &rarr; now they're in your conversation history
 
-Even "stealth" plugins get flagged by modern bot detection (Arkose Labs, Cloudflare Turnstile, PerimeterX). Your agent can't sign up for accounts, can't fill out forms on protected sites, can't pass CAPTCHAs.
+Your agent has no identity. Every session is a stranger.
 
 ## The Solution
 
-Navvi gives your agent a real browser with real input. No protocol tricks, no stealth patches &mdash; just a Firefox window controlled by OS-level mouse and keyboard, exactly like a human sitting at a desk.
+Navvi gives your agent a persistent browser with its own identity. A real Firefox that remembers where it's been, stays logged in, and manages its own credentials &mdash; without ever exposing passwords to the AI.
 
-- **Real mouse events** that websites cannot distinguish from a person
-- **Persistent identities** &mdash; cookies, logins, and history survive across sessions
-- **Live view** &mdash; connect via VNC when your agent needs human help (CAPTCHAs, OAuth)
-- **20 MCP tools** &mdash; drop into any Claude Code project
-
-## Use Cases
-
-**Account creation for AI personas.** Sign up for email, dev platforms, social accounts. Fill every form field, handle dropdowns and date pickers, get all the way to the CAPTCHA step undetected.
-
-**Visual evidence for pull requests.** Screenshot your staging app before and after a code change. Record a GIF of a user flow. Attach it to the PR automatically.
-
-**OAuth and login flows.** Log into a service once via VNC, and the session persists in a named volume. Your agent reuses the authenticated browser on every future run.
-
-**Web scraping on protected sites.** Navigate sites that block headless browsers. Your agent sees a real Firefox with a real fingerprint.
-
-**QA and smoke testing.** Point your agent at a form-heavy app and let it click through every flow, filling fields and verifying results.
+- **Persistent sessions** &mdash; cookies, logins, and history survive restarts
+- **Credential vault** &mdash; passwords stored in [gopass](https://github.com/gopasspw/gopass), auto-filled into forms without the AI ever seeing them
+- **Undetectable input** &mdash; OS-level mouse and keyboard events (`isTrusted: true`)
+- **Live view** &mdash; VNC link for when a human needs to step in (CAPTCHAs, OAuth, 2FA)
+- **21 MCP tools** &mdash; drop into any Claude Code project
 
 ## Quick Start
 
+### 1. Install
+
 ```bash
-# Install
-npm install -g navvi
-
-# Build the Docker image (one-time)
-navvi build
-
-# Add to Claude Code — in your .mcp.json:
-# { "mcpServers": { "navvi": { "command": "navvi" } } }
+npx navvi build
 ```
 
-Or skip the install: `"command": "npx", "args": ["-y", "navvi"]`
+This pulls the npm package and builds the Docker image. One-time setup.
 
-Your agent now has 21 browser tools. The workflow:
+### 2. Add to Claude Code
 
+Add this to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "navvi": {
+      "command": "npx",
+      "args": ["-y", "navvi"]
+    }
+  }
+}
 ```
-navvi_start                                    # spin up a browser container
-navvi_open url=https://example.com             # navigate
-navvi_find selector="input[type=email]"        # find element → get (x, y)
-navvi_fill x=512 y=498 value="me@example.com"  # type into it
-navvi_screenshot                               # verify visually
-navvi_creds action=autofill entry=navvi/default/tuta  # or autofill from gopass
-```
+
+That's it. Restart Claude Code and your agent has 21 browser tools.
 
 <details>
-<summary>Manual Docker setup (no npm)</summary>
+<summary>Alternative: global install</summary>
 
 ```bash
-git clone https://github.com/Fellowship-dev/navvi
-cd navvi
-docker build -t navvi container/
-docker run -d --name navvi-default -p 8024:8024 -p 6080:6080 navvi
+npm install -g navvi
+navvi build
 ```
+
+Then use `"command": "navvi"` instead of the npx version.
 </details>
+
+### 3. Use
+
+```
+navvi_start                                     → spin up a browser
+navvi_open url=https://example.com              → navigate
+navvi_find selector="input[type=email]"         → locate element → (x, y)
+navvi_fill x=512 y=498 value="me@example.com"  → type into it
+navvi_screenshot                                → see what happened
+```
+
+Or log in using stored credentials (password never visible to the AI):
+
+```
+navvi_creds action=list                         → show stored logins
+navvi_creds action=autofill entry=default/gmail  → fill username + password
+navvi_press key=Enter                           → submit
+```
+
+## Use Cases
+
+**Persistent logins.** Log into a service once &mdash; your agent stays logged in across sessions. No more re-entering credentials, no more expired sessions, no more "please log in again."
+
+**Secure credential management.** Passwords live in gopass inside the container. The `autofill` action types them directly into the browser &mdash; the AI never sees the raw password in its context.
+
+**Visual evidence for PRs.** Screenshot your staging app before and after a code change. Record a user flow as a GIF. Attach it to the pull request.
+
+**Form automation on protected sites.** Fill complex forms with dropdowns, date pickers, and multi-step wizards. OS-level input passes bot detection that blocks Selenium and Playwright.
+
+**Human handoff for hard CAPTCHAs.** When the agent hits a CAPTCHA it can't solve, it sends you a VNC link. You solve it in your browser, the agent continues.
 
 ## How It Works
 
 ```
 Your AI agent (Claude Code, etc.)
     |
-    | MCP tools / HTTP API
+    | MCP protocol (stdio)
+    v
+  navvi (npm package, Node.js)
+    |
+    | HTTP → localhost:8024
     v
 +--------------------------------------+
 |  Docker container                    |
 |                                      |
-|  Firefox  <-- Marionette (navigate)  |
+|  Firefox  ←  Marionette (navigate)   |
 |     |                                |
-|  Xvfb    <-- xdotool (click, type)  |
+|  Xvfb     ←  xdotool (click, type)  |
 |     |                                |
-|  x11vnc  --> noVNC (live view)       |
+|  x11vnc   →  noVNC (live view)       |
 |                                      |
-|  navvi-server (REST API on :8024)    |
+|  gopass (credential vault)           |
+|  navvi-server (REST API)             |
 +--------------------------------------+
     |
     v
-  Volume: persistent Firefox profile
+  Docker volume (persistent profile)
 ```
 
-**Navigation** goes through Firefox Marionette &mdash; a built-in protocol that doesn't expose automation markers.
+**Navigation** uses Firefox Marionette &mdash; a built-in protocol with no detectable automation markers.
 
-**All input** goes through xdotool &mdash; OS-level mouse and keyboard events that are indistinguishable from a real user.
+**All input** uses xdotool &mdash; OS-level events that websites cannot distinguish from a real person.
 
-**Screenshots** are captured at the display level, not through the browser API.
+**Credentials** are stored in gopass inside the container. The `autofill` action reads gopass and types directly into Firefox &mdash; the password travels from vault to browser, never through the AI.
 
-**Profiles persist** in Docker named volumes. Stop a container, start it again &mdash; you're still logged in.
+**Profiles persist** in Docker named volumes. Stop a container, start it next week &mdash; still logged in.
 
 ## MCP Tools
 
@@ -131,40 +158,46 @@ Your AI agent (Claude Code, etc.)
 | `navvi_press` | Press a key (Enter, Tab, Escape...) |
 | `navvi_scroll` | Scroll the page |
 | `navvi_drag` | Drag from point A to point B |
-| `navvi_mousedown` | Press and hold (for CAPTCHAs) |
+| `navvi_mousedown` | Press and hold |
 | `navvi_mouseup` | Release mouse button |
+| `navvi_mousemove` | Move mouse without clicking |
 | `navvi_screenshot` | Capture the screen |
-| `navvi_vnc` | Get live view URL for human help |
+| `navvi_creds` | List, get metadata, or autofill credentials from gopass |
+| `navvi_vnc` | Get live view URL for human handoff |
 | `navvi_url` | Get current page URL |
 | `navvi_record_start` | Start recording a video |
 | `navvi_record_stop` | Stop and assemble MP4 |
 | `navvi_record_gif` | Convert recording to GIF |
+| `navvi_status` | Show running containers |
+| `navvi_list` | List available Codespaces (remote mode) |
 
-### The Workflow
+### Key Workflow
 
-```
-navvi_find("input[type=email]")  -->  { x: 512, y: 498 }
-navvi_fill(x=512, y=498, value="me@example.com")
-navvi_screenshot()  -->  verify it worked
-```
-
-`navvi_find` is the key tool. It finds elements by CSS selector and returns **screen-ready coordinates** that you pass directly to `navvi_click` or `navvi_fill`. No coordinate math required.
-
-### When Your Agent Gets Stuck
-
-Some CAPTCHAs (Arkose Labs, image puzzles) require human eyes. When that happens:
+`navvi_find` is the primary way to get coordinates. It returns screen-ready `(x, y)` values that account for browser chrome. Pass them directly to `navvi_click` or `navvi_fill`.
 
 ```
-navvi_vnc()  -->  http://127.0.0.1:6080/vnc.html?autoconnect=true
+navvi_find("button[type=submit]")  →  { x: 512, y: 563, text: "Log in" }
+navvi_click(x=512, y=563)
 ```
 
-Send the URL to the user. They solve the CAPTCHA in their browser, your agent continues.
+For dropdowns: `navvi_find` the button &rarr; `navvi_click` to open &rarr; `navvi_find` the options &rarr; `navvi_click` the one you want.
+
+### When Your Agent Needs Help
+
+Some sites require human intervention (CAPTCHAs, OAuth consent, 2FA codes). The agent asks for help:
+
+```
+navvi_vnc()  →  http://127.0.0.1:6080/vnc.html?autoconnect=true
+```
+
+Open the URL, do what the agent can't, and it picks up where you left off.
 
 ## Personas
 
-Define a persona in `personas/`:
+Each persona is a separate browser identity with its own cookies, credentials, and history.
 
 ```yaml
+# personas/default.yaml
 name: default
 description: Default browser persona
 browser:
@@ -172,7 +205,13 @@ browser:
   timezone: America/Santiago
 ```
 
-Each persona gets its own Docker volume (`navvi-profile-<name>`). Start it, log into your services via VNC, and the session persists forever. Your agent reuses the authenticated browser every time.
+Personas are backed by Docker named volumes (`navvi-profile-<name>`). Create as many as you need &mdash; one for each service, project, or team member.
+
+## Requirements
+
+- **Docker** &mdash; the browser runs in a container
+- **Node.js 18+** &mdash; the MCP server is a Node.js process
+- **ffmpeg** (optional) &mdash; only needed for video recording
 
 ## License
 
