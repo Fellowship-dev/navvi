@@ -74,14 +74,36 @@ scripts/
 | `/screenshot` | GET | scrot → base64 PNG |
 | `/cursor` | GET | xdotool |
 | `/execute` | POST `{script}` | Marionette |
+| `/find` | POST `{selector, all?}` | Marionette + viewport offset correction |
+| `/viewport` | GET | viewport offset (screen vs JS coords) |
 
-## MCP Tools (19 total)
+## MCP Tools (20 total)
 
 **Lifecycle:** `navvi_start`, `navvi_stop`, `navvi_status`, `navvi_list`
 
-**Browser:** `navvi_open`, `navvi_click`, `navvi_fill`, `navvi_press`, `navvi_drag`, `navvi_mousedown`, `navvi_mouseup`, `navvi_mousemove`, `navvi_scroll`, `navvi_screenshot`, `navvi_url`, `navvi_vnc`
+**Browser:** `navvi_open`, `navvi_find`, `navvi_click`, `navvi_fill`, `navvi_press`, `navvi_drag`, `navvi_mousedown`, `navvi_mouseup`, `navvi_mousemove`, `navvi_scroll`, `navvi_screenshot`, `navvi_url`, `navvi_vnc`
 
 **Recording:** `navvi_record_start`, `navvi_record_stop`, `navvi_record_gif`
+
+## Workflow (important!)
+
+```
+navvi_start → navvi_open(url) → navvi_find(selector) → navvi_click/navvi_fill(x, y) → navvi_screenshot (verify)
+```
+
+**Always use `navvi_find` to get coordinates.** It returns screen-ready `(x, y)` values that account for the browser chrome offset (toolbar, notification bars). Do NOT use raw JS `getBoundingClientRect()` — those are viewport-relative and will be ~160px off vertically.
+
+**For dropdowns/selects:**
+1. `navvi_find` the trigger button
+2. `navvi_click` to open
+3. `navvi_find` the options (`selector="[role=option]"`, `all=true`)
+4. `navvi_click` the desired option
+
+**For CAPTCHAs (press-and-hold):**
+1. `navvi_find` the challenge button/iframe
+2. `navvi_mousedown` at those coords
+3. Wait 3-7 seconds
+4. `navvi_mouseup` at same coords
 
 ## Persona Persistence
 

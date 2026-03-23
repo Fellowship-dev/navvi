@@ -238,7 +238,7 @@ function formatMissing(missing) {
 const TOOLS = [
   {
     name: 'navvi_start',
-    description: 'Start a Navvi browser container for a persona. Local mode runs Docker on your machine. Remote spins up a GitHub Codespace.',
+    description: 'Start a Navvi browser container (Firefox + Xvfb + xdotool). Local=Docker, Remote=Codespace. After starting, the workflow is: navvi_open(url) → navvi_find(selector) to get screen coordinates → navvi_click/navvi_fill at those coords → navvi_screenshot to verify. All input is OS-level (isTrusted:true), undetectable by bot detection.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -270,7 +270,7 @@ const TOOLS = [
   },
   {
     name: 'navvi_open',
-    description: 'Navigate to a URL in the active browser. Uses Firefox Marionette for reliable navigation.',
+    description: 'Navigate to a URL in the active browser. After navigating, use navvi_find to locate elements on the page, then navvi_click/navvi_fill to interact.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -282,7 +282,7 @@ const TOOLS = [
   },
   {
     name: 'navvi_click',
-    description: 'Click at (x, y) coordinates using OS-level xdotool input (isTrusted: true). Take a navvi_screenshot first to identify the target position.',
+    description: 'Click at (x, y) screen coordinates using OS-level xdotool input (isTrusted: true). IMPORTANT: Use navvi_find to get coordinates — it returns screen-ready (x, y) values. Do NOT use raw JS getBoundingClientRect() — those are viewport coords that miss the browser chrome offset.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -295,7 +295,7 @@ const TOOLS = [
   },
   {
     name: 'navvi_fill',
-    description: 'Click at (x, y) then type text using OS-level xdotool input. Types character by character with configurable delay.',
+    description: 'Click at (x, y) to focus an input field, then type text using OS-level xdotool. Get coordinates from navvi_find first. Selects existing text (Ctrl+A) before typing to replace any current value.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -322,7 +322,7 @@ const TOOLS = [
   },
   {
     name: 'navvi_drag',
-    description: 'Drag from (x1,y1) to (x2,y2) with interpolated mouse moves. Uses OS-level input — works on CAPTCHAs and canvases.',
+    description: 'Drag from (x1,y1) to (x2,y2) with interpolated mouse moves. Uses OS-level input — works on CAPTCHAs and canvases. Get coordinates from navvi_find.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -339,7 +339,7 @@ const TOOLS = [
   },
   {
     name: 'navvi_mousedown',
-    description: 'Press and hold mouse button at (x, y). Pair with navvi_mouseup for press-and-hold CAPTCHAs.',
+    description: 'Press and hold mouse button at (x, y). Pair with navvi_mouseup for press-and-hold CAPTCHAs. Get coordinates from navvi_find. isTrusted: true events bypass Arkose Labs detection.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -390,7 +390,7 @@ const TOOLS = [
   },
   {
     name: 'navvi_screenshot',
-    description: 'Take a screenshot of the virtual display. Returns file path. Use this to see what the browser shows and identify coordinates for click/fill/drag.',
+    description: 'Take a screenshot of the virtual display. Returns file path to a PNG image — use Read tool to view it. Use for VISUAL VERIFICATION only (confirming what happened). To get clickable coordinates, use navvi_find instead — screenshot pixel positions include browser chrome and are not reliable for targeting elements.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -410,7 +410,7 @@ const TOOLS = [
   },
   {
     name: 'navvi_vnc',
-    description: 'Get the noVNC URL for live browser view. Open this in a real browser for human intervention (CAPTCHAs, OAuth, etc.).',
+    description: 'Get the noVNC URL for live browser view. Share with the user when human intervention is needed: visual CAPTCHAs that require image recognition, OAuth consent screens, or 2FA code entry. The user opens this URL in their real browser to interact directly.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -420,7 +420,7 @@ const TOOLS = [
   },
   {
     name: 'navvi_find',
-    description: 'Find element(s) by CSS selector. Returns screen-ready coordinates that can be passed directly to navvi_click/navvi_fill. Automatically corrects for browser chrome offset (toolbar, notification bars).',
+    description: 'Find element(s) by CSS selector and return screen-ready (x, y) coordinates. THIS IS THE PRIMARY WAY TO GET COORDINATES — use before navvi_click, navvi_fill, navvi_drag, navvi_mousedown. Automatically corrects for browser chrome offset. Workflow: navvi_find → get (x, y) → navvi_click/navvi_fill at those coords → navvi_screenshot to verify. For dropdowns: navvi_find the button → navvi_click to open → navvi_find the options (selector="[role=option]", all=true) → navvi_click the desired option.',
     inputSchema: {
       type: 'object',
       properties: {
