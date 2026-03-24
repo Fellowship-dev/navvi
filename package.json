@@ -34,7 +34,7 @@
     "url": "https://github.com/Fellowship-dev/navvi"
   },
   "homepage": "https://github.com/Fellowship-dev/navvi#readme",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "scripts": {
     "build": "docker build -t navvi container/"
   }

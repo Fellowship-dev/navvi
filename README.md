@@ -215,4 +215,4 @@ Personas are backed by Docker named volumes (`navvi-profile-<name>`). Create as 
 
 ## License
 
-Apache 2.0
+MIT
