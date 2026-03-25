@@ -47,7 +47,7 @@ if [ -d "/workspaces/.codespaces/.persistedshare" ]; then
   fi
 fi
 
-# --- Gopass init (if GPG key provided via env) ---
+# --- Gopass init (opt-in: provide GPG_PRIVATE_KEY env var) ---
 if [ -n "${GPG_PRIVATE_KEY:-}" ]; then
   echo "[navvi] Importing GPG key for gopass..."
   echo "$GPG_PRIVATE_KEY" | gpg --batch --import 2>/dev/null
@@ -60,6 +60,15 @@ if [ -n "${GPG_PRIVATE_KEY:-}" ]; then
     echo "[navvi] Gopass ready (key: ${GPG_ID:0:8}...)"
   fi
   unset GPG_PRIVATE_KEY
+elif [ -n "$(gpg --list-secret-keys 2>/dev/null)" ]; then
+  # Existing key from persistent volume (Codespaces)
+  GPG_ID=$(gpg --list-secret-keys --keyid-format long 2>/dev/null | grep sec | head -1 | awk '{print $2}' | cut -d/ -f2)
+  if [ -n "$GPG_ID" ] && [ ! -d "$HOME/.local/share/gopass/stores/root" ]; then
+    gopass init --path "$HOME/.local/share/gopass/stores/root" "$GPG_ID" 2>/dev/null
+  fi
+  echo "[navvi] Gopass ready (existing key: ${GPG_ID:0:8}...)"
+else
+  echo "[navvi] Gopass disabled — no GPG key. Set GPG_PRIVATE_KEY env var to enable credential management."
 fi
 
 # --- Graceful shutdown ---
