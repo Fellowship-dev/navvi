@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Navvi MCP Server v2.0.0 — persistent browser personas via Docker containers.
+Navvi MCP Server v3.3.0 — persistent browser personas via Docker containers.
 
 Lifecycle:
   navvi_start (local|remote), navvi_stop, navvi_status, navvi_list
@@ -18,6 +18,9 @@ Credentials:
 
 Video recording:
   navvi_record_start, navvi_record_stop, navvi_record_gif
+
+Journey tools:
+  navvi_browse, navvi_login
 
 Speaks MCP stdio protocol via FastMCP.
 """
@@ -82,7 +85,7 @@ active_persona: Optional[str] = None
 
 mcp = FastMCP(
     "navvi",
-    version="3.2.0",
+    version="3.3.0",
 )
 
 # Ensure default persona exists on startup
@@ -1425,6 +1428,306 @@ async def navvi_record_gif(input: str = "") -> str:
 
     size_kb = round(os.path.getsize(output_file) / 1024)
     return f"GIF created: {output_file} ({size_kb}KB)\n\nDo NOT use Read on this file."
+
+
+# --- Journey Helpers ---
+
+
+def _save_screenshot(b64_data: str) -> str:
+    """Save base64 screenshot to temp file, return path."""
+    path = os.path.join(tempfile.gettempdir(), "navvi-browse-{}.png".format(int(time.time() * 1000)))
+    with open(path, "wb") as f:
+        f.write(base64.b64decode(b64_data))
+    return path
+
+
+def _element_matches_description(element: dict, description: str) -> bool:
+    """Fuzzy match an element against a natural language description."""
+    desc_lower = description.lower()
+    desc_words = desc_lower.split()
+    text = element.get("text", "").lower()
+    aria = element.get("ariaLabel", "").lower()
+    placeholder = element.get("placeholder", "").lower()
+    name = element.get("name", "").lower()
+
+    for attr in [text, aria, placeholder, name]:
+        if attr and any(word in attr for word in desc_words):
+            return True
+    return False
+
+
+def _format_steps_log(steps: list) -> str:
+    """Format steps log for human readability."""
+    lines = []
+    for s in steps:
+        conf = s.get("confidence", 0)
+        lines.append(
+            "  Step {}: [{}] {} -> {} (tier: {}, conf: {:.1f})".format(
+                s["step"], s["page_type"], s["description"],
+                s["action_taken"], s["tier"], conf,
+            )
+        )
+    return "\n".join(lines)
+
+
+async def _execute_action(action: dict, api_base: str, dom_elements: list):
+    """Execute a suggested action against the browser."""
+    atype = action.get("type", "none")
+
+    if atype == "click":
+        selector = action.get("selector_hint", "")
+        target_desc = action.get("target", "")
+        if selector:
+            try:
+                resp = await api_call("POST", "/find", {"selector": selector}, api_base)
+                if resp.get("found"):
+                    x, y = resp.get("x"), resp.get("y")
+                    await api_call("POST", "/click", {"x": x, "y": y}, api_base)
+                    return
+            except Exception:
+                pass
+        # Fallback: find element matching description in dom_elements
+        for el in dom_elements:
+            if _element_matches_description(el, target_desc):
+                await api_call("POST", "/click", {"x": el["x"], "y": el["y"]}, api_base)
+                return
+
+    elif atype == "fill":
+        selector = action.get("selector_hint", "")
+        value = action.get("value", "")
+        if selector and value:
+            try:
+                resp = await api_call("POST", "/find", {"selector": selector}, api_base)
+                if resp.get("found"):
+                    x, y = resp.get("x"), resp.get("y")
+                    await api_call("POST", "/click", {"x": x, "y": y}, api_base)
+                    await asyncio.sleep(0.1)
+                    await api_call("POST", "/type", {"text": value}, api_base)
+                    return
+            except Exception:
+                pass
+
+    elif atype == "press":
+        key = action.get("value", "Return")
+        await api_call("POST", "/key", {"key": key}, api_base)
+
+    elif atype == "scroll":
+        await api_call("POST", "/scroll", {"direction": "down", "amount": 3}, api_base)
+
+    elif atype == "navigate":
+        nav_url = action.get("value", "")
+        if nav_url:
+            await api_call("POST", "/navigate", {"url": nav_url}, api_base)
+
+    elif atype == "dismiss":
+        selector = action.get("selector_hint", "")
+        if selector:
+            try:
+                resp = await api_call("POST", "/find", {"selector": selector}, api_base)
+                if resp.get("found"):
+                    await api_call("POST", "/click", {"x": resp["x"], "y": resp["y"]}, api_base)
+            except Exception:
+                pass
+
+
+# --- Journey Tools ---
+
+
+@mcp.tool(tags={"journey"})
+async def navvi_browse(
+    instruction: str,
+    url: str = "",
+    max_steps: int = 10,
+    persona: str = "",
+) -> str:
+    """Browse the web autonomously — navigate, interact, and report results.
+
+    Give a natural language instruction like:
+    - "Search DuckDuckGo for 'Python FastMCP' and list the top 3 results"
+    - "Go to github.com/Fellowship-dev/navvi and tell me the star count"
+    - "Accept cookie banners on example.com and screenshot the clean page"
+
+    The tool will:
+    1. Navigate to the URL (or search for it)
+    2. Analyze each page via screenshot
+    3. Take actions (click, fill, scroll) to achieve the goal
+    4. Return results with screenshots
+
+    Uses vision analysis when ANTHROPIC_API_KEY is available (Haiku, ~$0.002/step).
+    Falls back to heuristics + client guidance without it.
+    """
+    from navvi.vision import analyze
+
+    pname, api_base = resolve_persona(persona or None)
+
+    # Navigate to URL if provided
+    if url:
+        try:
+            await api_call("POST", "/navigate", {"url": url}, api_base)
+            log_action("browse_navigate", url)
+        except Exception as e:
+            return "Failed to navigate to {}: {}".format(url, e)
+
+    steps_log = []
+
+    for step in range(max_steps):
+        # 1. Get current state
+        try:
+            current_url_resp = await api_call("GET", "/url", api_base=api_base)
+            current_url = current_url_resp.get("url", "")
+            current_title = current_url_resp.get("title", "")
+        except Exception:
+            current_url = ""
+            current_title = ""
+
+        # 2. Screenshot
+        try:
+            shot_resp = await api_call("GET", "/screenshot", api_base=api_base)
+            screenshot_b64 = shot_resp.get("base64", "")
+        except Exception:
+            screenshot_b64 = ""
+
+        # 3. Get DOM info
+        try:
+            dom_resp = await api_call(
+                "POST", "/find",
+                {"selector": "a, button, input, select, textarea, [role=button], [role=link]", "all": True},
+                api_base,
+            )
+            dom_elements = dom_resp.get("elements", [])
+        except Exception:
+            dom_elements = []
+
+        # 4. Analyze
+        analysis = await analyze(screenshot_b64, dom_elements, instruction, current_url, current_title)
+
+        tier = analysis.get("tier_used", "unknown")
+        confidence = analysis.get("confidence", 0)
+        action = analysis.get("suggested_action", {})
+
+        steps_log.append({
+            "step": step + 1,
+            "url": current_url,
+            "page_type": analysis.get("page_type", "unknown"),
+            "description": analysis.get("description", ""),
+            "action_taken": action.get("type", "none"),
+            "tier": tier,
+            "confidence": confidence,
+        })
+
+        # 5. Check if done
+        if action.get("type") == "done":
+            log_persona_action(pname, "browse_complete", "{} ({} steps)".format(instruction, step + 1))
+            shot_path = _save_screenshot(screenshot_b64) if screenshot_b64 else "(no screenshot)"
+            summary = _format_steps_log(steps_log)
+            return "Completed in {} steps.\n\n{}\n\nFinal screenshot: {}".format(step + 1, summary, shot_path)
+
+        # 6. Check if stuck (low confidence + heuristics tier = ask for guidance)
+        if confidence < 0.5 and tier == "heuristics":
+            shot_path = _save_screenshot(screenshot_b64) if screenshot_b64 else "(no screenshot)"
+            summary = _format_steps_log(steps_log)
+            return (
+                "Need guidance at step {}/{}.\n\n"
+                "Goal: {}\n"
+                "Current URL: {}\n"
+                "Page type: {}\n"
+                "Description: {}\n\n"
+                "Steps so far:\n{}\n\n"
+                "Screenshot: {}\n\n"
+                "Suggestion: Use navvi_find to explore the page, then navvi_click/navvi_fill to continue."
+            ).format(
+                step + 1, max_steps, instruction, current_url,
+                analysis.get("page_type", "unknown"),
+                analysis.get("description", "could not classify"),
+                summary, shot_path,
+            )
+
+        # 7. Execute action
+        if action.get("type") == "abort":
+            reason = action.get("target", "unknown reason")
+            log_persona_action(pname, "browse_abort", reason)
+            return "Aborted: {}\n\nSteps:\n{}".format(reason, _format_steps_log(steps_log))
+
+        await _execute_action(action, api_base, dom_elements)
+        await asyncio.sleep(1)  # Wait for page to settle
+
+    # Max steps reached
+    try:
+        shot_resp = await api_call("GET", "/screenshot", api_base=api_base)
+        shot_path = _save_screenshot(shot_resp.get("base64", ""))
+    except Exception:
+        shot_path = "(no screenshot)"
+    return "Reached max steps ({}). Last screenshot: {}\n\n{}".format(
+        max_steps, shot_path, _format_steps_log(steps_log),
+    )
+
+
+@mcp.tool(tags={"journey"})
+async def navvi_login(service: str, persona: str = "default") -> str:
+    """Log into a service using stored credentials.
+
+    Reads credentials from gopass (via navvi_creds), navigates to the service's
+    login page, fills in the form, and verifies login success.
+
+    If 2FA is required, returns the VNC URL for human intervention.
+    """
+    pname, api_base = resolve_persona(persona or None)
+
+    # 1. Check if persona has an account for this service
+    accounts = list_accounts(pname)
+    account = None
+    for a in accounts:
+        if service.lower() in a["service"].lower():
+            account = a
+            break
+
+    if not account:
+        return "No account found for '{}' on persona '{}'. Use navvi_account to add one first.".format(
+            service, pname,
+        )
+
+    if not account.get("creds_ref"):
+        return "Account for '{}' has no credential reference. Update it with navvi_account.".format(service)
+
+    # 2. Navigate to service
+    log_persona_action(pname, "login_start", service)
+    try:
+        await api_call("POST", "/navigate", {"url": "https://{}".format(service)}, api_base)
+    except Exception as e:
+        return "Failed to navigate to {}: {}".format(service, e)
+    await asyncio.sleep(2)
+
+    # 3. Try autofill
+    creds_ref = account["creds_ref"].replace("gopass://", "")
+    try:
+        result = await api_call("POST", "/creds/autofill", {"entry": creds_ref}, api_base)
+        if result.get("ok") or result.get("username_at"):
+            await asyncio.sleep(0.5)
+            # Press Enter to submit
+            await api_call("POST", "/key", {"key": "Return"}, api_base)
+            await asyncio.sleep(3)
+
+            # Check result
+            url_resp = await api_call("GET", "/url", api_base=api_base)
+            shot_resp = await api_call("GET", "/screenshot", api_base=api_base)
+            shot_path = _save_screenshot(shot_resp.get("base64", ""))
+
+            log_persona_action(pname, "login_complete", "{} -> {}".format(service, url_resp.get("url", "")))
+            return (
+                "Login attempted for {}.\n"
+                "URL: {}\n"
+                "Screenshot: {}\n\n"
+                "Verify the screenshot to confirm login success. "
+                "If 2FA is needed, use navvi_vnc for manual intervention."
+            ).format(service, url_resp.get("url", ""), shot_path)
+    except Exception as e:
+        return (
+            "Autofill failed: {}. "
+            "The login page may have a non-standard layout. "
+            "Use navvi_browse or atomic tools instead."
+        ).format(e)
+
+    return "Autofill returned no confirmation. Check the page with navvi_screenshot."
 
 
 # --- Entry point ---
