@@ -1,0 +1,292 @@
+"""
+Navvi persistent store — SQLite-backed persona config, state, and action log.
+
+Schema:
+  personas: config + runtime state (name, description, purpose, stealth, locale, timezone, etc.)
+  accounts: credential references per persona (service, email, gopass ref, status)
+  actions:  append-only action log per persona (timestamped events)
+"""
+
+import json
+import sqlite3
+import time
+from pathlib import Path
+from typing import Optional
+
+
+def _db_path() -> str:
+    """Resolve DB path: ~/.navvi/navvi.db"""
+    navvi_dir = Path.home() / ".navvi"
+    navvi_dir.mkdir(parents=True, exist_ok=True)
+    return str(navvi_dir / "navvi.db")
+
+
+def _connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(_db_path())
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
+
+
+def init_db():
+    """Create tables if they don't exist."""
+    conn = _connect()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS personas (
+            name TEXT PRIMARY KEY,
+            description TEXT DEFAULT '',
+            purpose TEXT DEFAULT '',
+            stealth TEXT DEFAULT 'high',
+            locale TEXT DEFAULT 'en-US',
+            timezone TEXT DEFAULT 'UTC',
+            viewport TEXT DEFAULT '1024x768',
+            created_at REAL NOT NULL,
+            last_used_at REAL
+        );
+
+        CREATE TABLE IF NOT EXISTS accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            persona TEXT NOT NULL REFERENCES personas(name) ON DELETE CASCADE,
+            service TEXT NOT NULL,
+            email TEXT DEFAULT '',
+            creds_ref TEXT DEFAULT '',
+            status TEXT DEFAULT 'active',
+            created_at REAL NOT NULL,
+            notes TEXT DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            persona TEXT NOT NULL REFERENCES personas(name) ON DELETE CASCADE,
+            action TEXT NOT NULL,
+            detail TEXT DEFAULT '',
+            ts REAL NOT NULL
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+
+# --- Persona CRUD ---
+
+def create_persona(
+    name: str,
+    description: str = "",
+    purpose: str = "",
+    stealth: str = "high",
+    locale: str = "en-US",
+    timezone: str = "UTC",
+    viewport: str = "1024x768",
+) -> dict:
+    conn = _connect()
+    now = time.time()
+    try:
+        conn.execute(
+            "INSERT INTO personas (name, description, purpose, stealth, locale, timezone, viewport, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (name, description, purpose, stealth, locale, timezone, viewport, now),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        raise ValueError(f"Persona '{name}' already exists. Use update to modify.")
+    conn.close()
+    return get_persona(name)
+
+
+def get_persona(name: str) -> Optional[dict]:
+    conn = _connect()
+    row = conn.execute("SELECT * FROM personas WHERE name = ?", (name,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    return dict(row)
+
+
+def update_persona(name: str, **kwargs) -> dict:
+    conn = _connect()
+    existing = conn.execute("SELECT * FROM personas WHERE name = ?", (name,)).fetchone()
+    if not existing:
+        conn.close()
+        raise ValueError(f"Persona '{name}' not found.")
+    allowed = {"description", "purpose", "stealth", "locale", "timezone", "viewport"}
+    updates = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
+    if not updates:
+        conn.close()
+        return dict(existing)
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    values = list(updates.values()) + [name]
+    conn.execute(f"UPDATE personas SET {set_clause} WHERE name = ?", values)
+    conn.commit()
+    conn.close()
+    return get_persona(name)
+
+
+def delete_persona(name: str) -> bool:
+    conn = _connect()
+    cursor = conn.execute("DELETE FROM personas WHERE name = ?", (name,))
+    conn.commit()
+    conn.close()
+    return cursor.rowcount > 0
+
+
+def list_personas() -> list:
+    conn = _connect()
+    rows = conn.execute("SELECT * FROM personas ORDER BY created_at").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def touch_persona(name: str):
+    """Update last_used_at timestamp."""
+    conn = _connect()
+    conn.execute("UPDATE personas SET last_used_at = ? WHERE name = ?", (time.time(), name))
+    conn.commit()
+    conn.close()
+
+
+# --- Ensure default persona exists ---
+
+def ensure_default():
+    """Create 'default' persona if it doesn't exist."""
+    if not get_persona("default"):
+        create_persona(name="default", description="Default browser persona")
+
+
+# --- Accounts ---
+
+def add_account(
+    persona: str,
+    service: str,
+    email: str = "",
+    creds_ref: str = "",
+    status: str = "active",
+    notes: str = "",
+) -> dict:
+    conn = _connect()
+    now = time.time()
+    cursor = conn.execute(
+        "INSERT INTO accounts (persona, service, email, creds_ref, status, created_at, notes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (persona, service, email, creds_ref, status, now, notes),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM accounts WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    conn.close()
+    return dict(row)
+
+
+def list_accounts(persona: str) -> list:
+    conn = _connect()
+    rows = conn.execute("SELECT * FROM accounts WHERE persona = ? ORDER BY created_at", (persona,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_account(account_id: int, **kwargs) -> dict:
+    conn = _connect()
+    allowed = {"service", "email", "creds_ref", "status", "notes"}
+    updates = {k: v for k, v in kwargs.items() if k in allowed and v is not None}
+    if updates:
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [account_id]
+        conn.execute(f"UPDATE accounts SET {set_clause} WHERE id = ?", values)
+        conn.commit()
+    row = conn.execute("SELECT * FROM accounts WHERE id = ?", (account_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else {}
+
+
+def delete_account(account_id: int) -> bool:
+    conn = _connect()
+    cursor = conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+    conn.commit()
+    conn.close()
+    return cursor.rowcount > 0
+
+
+# --- Action Log ---
+
+def log_persona_action(persona: str, action: str, detail: str = ""):
+    conn = _connect()
+    conn.execute(
+        "INSERT INTO actions (persona, action, detail, ts) VALUES (?, ?, ?, ?)",
+        (persona, action, detail, time.time()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_recent_actions(persona: str, limit: int = 20) -> list:
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT * FROM actions WHERE persona = ? ORDER BY ts DESC LIMIT ?",
+        (persona, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in reversed(rows)]
+
+
+# --- State resource (compact YAML-like summary) ---
+
+def persona_state_summary(name: str) -> str:
+    """Generate a compact state summary for the persona resource."""
+    p = get_persona(name)
+    if not p:
+        return f"Persona '{name}' not found."
+
+    lines = [
+        f"persona: {p['name']}",
+        f"description: {p['description']}" if p['description'] else None,
+        f"purpose: {p['purpose']}" if p['purpose'] else None,
+        f"stealth: {p['stealth']}",
+        f"locale: {p['locale']}",
+        f"timezone: {p['timezone']}",
+        f"viewport: {p['viewport']}",
+        f"created: {_format_ts(p['created_at'])}",
+        f"last_used: {_format_ts(p['last_used_at'])}" if p['last_used_at'] else None,
+        f"docker_volume: navvi-profile-{p['name']}",
+    ]
+
+    accounts = list_accounts(name)
+    if accounts:
+        lines.append("")
+        lines.append("accounts:")
+        for a in accounts:
+            status_suffix = f" ({a['status']})" if a['status'] != 'active' else ""
+            creds = f" creds={a['creds_ref']}" if a['creds_ref'] else ""
+            lines.append(f"  - {a['service']}: {a['email']}{creds}{status_suffix}")
+
+    actions = get_recent_actions(name, limit=10)
+    if actions:
+        lines.append("")
+        lines.append("recent_actions:")
+        for a in actions:
+            lines.append(f"  - {_format_ts(a['ts'])} — {a['action']}: {a['detail']}")
+
+    return "\n".join(l for l in lines if l is not None)
+
+
+def personas_list_summary() -> str:
+    """Generate a compact list of all personas."""
+    personas = list_personas()
+    if not personas:
+        return "No personas configured. Use navvi_persona to create one."
+    lines = []
+    for p in personas:
+        acct_count = len(list_accounts(p['name']))
+        last = _format_ts(p['last_used_at']) if p['last_used_at'] else "never"
+        desc = f" — {p['description']}" if p['description'] else ""
+        lines.append(f"- {p['name']}{desc} ({acct_count} accounts, last used: {last})")
+    return "\n".join(lines)
+
+
+def _format_ts(ts: Optional[float]) -> str:
+    if not ts:
+        return "never"
+    import datetime
+    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+
+
+# Initialize on import
+init_db()
+ensure_default()

@@ -39,6 +39,23 @@ from typing import Optional
 import httpx
 from fastmcp import FastMCP
 
+from navvi.store import (
+    create_persona,
+    get_persona,
+    update_persona,
+    delete_persona,
+    list_personas,
+    touch_persona,
+    add_account,
+    list_accounts,
+    update_account,
+    delete_account,
+    log_persona_action,
+    persona_state_summary,
+    personas_list_summary,
+    ensure_default,
+)
+
 # --- Constants ---
 
 PACKAGE_DIR = os.environ.get("NAVVI_PACKAGE_DIR") or str(Path(__file__).resolve().parent.parent)
@@ -65,8 +82,39 @@ active_persona: Optional[str] = None
 
 mcp = FastMCP(
     "navvi",
-    version="2.0.0",
+    version="3.1.0",
 )
+
+# Ensure default persona exists on startup
+ensure_default()
+
+
+# --- MCP Resources ---
+
+
+@mcp.resource("persona://{name}/state")
+def persona_state_resource(name: str) -> str:
+    """Current persona state — config, accounts, recent actions."""
+    return persona_state_summary(name)
+
+
+@mcp.resource("persona://{name}/accounts")
+def persona_accounts_resource(name: str) -> str:
+    """All accounts registered for this persona."""
+    accounts = list_accounts(name)
+    if not accounts:
+        return f"No accounts for persona '{name}'."
+    lines = []
+    for a in accounts:
+        lines.append(f"- [{a['id']}] {a['service']}: {a['email']} (status: {a['status']}, creds: {a['creds_ref'] or 'none'})")
+    return "\n".join(lines)
+
+
+@mcp.resource("personas://list")
+def personas_list_resource() -> str:
+    """All personas with account counts and last-used dates."""
+    return personas_list_summary()
+
 
 # --- Helpers ---
 
@@ -296,6 +344,164 @@ def resolve_persona(persona: Optional[str] = None) -> tuple:
     return name, f"http://127.0.0.1:{ports['api']}"
 
 
+# --- Persona & Account Tools ---
+
+
+@mcp.tool()
+async def navvi_persona(
+    action: str,
+    name: str = "",
+    description: str = "",
+    purpose: str = "",
+    stealth: str = "",
+    locale: str = "",
+    timezone: str = "",
+    viewport: str = "",
+) -> str:
+    """Manage browser personas. Actions: create, get, update, list, delete.
+
+    Create: navvi_persona(action="create", name="mybot", description="GitHub admin", stealth="high")
+    List: navvi_persona(action="list")
+    Get: navvi_persona(action="get", name="mybot")
+    Update: navvi_persona(action="update", name="mybot", purpose="new purpose")
+    Delete: navvi_persona(action="delete", name="mybot")
+
+    Personas store config (locale, timezone, stealth, purpose) and track accounts + action history.
+    Each persona maps to a persistent Docker volume (navvi-profile-<name>).
+    Read persona state via resource: persona://<name>/state"""
+    try:
+        if action == "create":
+            if not name:
+                return "Error: name is required for create."
+            kwargs = {}
+            if description:
+                kwargs["description"] = description
+            if purpose:
+                kwargs["purpose"] = purpose
+            if stealth:
+                kwargs["stealth"] = stealth
+            if locale:
+                kwargs["locale"] = locale
+            if timezone:
+                kwargs["timezone"] = timezone
+            if viewport:
+                kwargs["viewport"] = viewport
+            p = create_persona(name, **kwargs)
+            return f"Persona '{name}' created.\n\n{persona_state_summary(name)}"
+
+        elif action == "get":
+            if not name:
+                return "Error: name is required for get."
+            p = get_persona(name)
+            if not p:
+                return f"Persona '{name}' not found."
+            return persona_state_summary(name)
+
+        elif action == "update":
+            if not name:
+                return "Error: name is required for update."
+            kwargs = {}
+            if description:
+                kwargs["description"] = description
+            if purpose:
+                kwargs["purpose"] = purpose
+            if stealth:
+                kwargs["stealth"] = stealth
+            if locale:
+                kwargs["locale"] = locale
+            if timezone:
+                kwargs["timezone"] = timezone
+            if viewport:
+                kwargs["viewport"] = viewport
+            update_persona(name, **kwargs)
+            return f"Persona '{name}' updated.\n\n{persona_state_summary(name)}"
+
+        elif action == "list":
+            return personas_list_summary()
+
+        elif action == "delete":
+            if not name:
+                return "Error: name is required for delete."
+            if name == "default":
+                return "Error: cannot delete the default persona."
+            if delete_persona(name):
+                return f"Persona '{name}' deleted. Docker volume navvi-profile-{name} is preserved (remove manually with: docker volume rm navvi-profile-{name})."
+            return f"Persona '{name}' not found."
+
+        else:
+            return f"Unknown action '{action}'. Valid: create, get, update, list, delete."
+    except ValueError as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+async def navvi_account(
+    action: str,
+    persona: str = "default",
+    service: str = "",
+    email: str = "",
+    creds_ref: str = "",
+    status: str = "active",
+    notes: str = "",
+    account_id: int = 0,
+) -> str:
+    """Manage accounts linked to a persona. Actions: add, list, update, delete.
+
+    Add: navvi_account(action="add", persona="mybot", service="github", email="bot@x.com", creds_ref="gopass://navvi/mybot/github")
+    List: navvi_account(action="list", persona="mybot")
+    Update: navvi_account(action="update", account_id=1, status="blocked", notes="captcha")
+    Delete: navvi_account(action="delete", account_id=1)
+
+    Accounts track which services a persona has registered on, with credential references (gopass://) and status."""
+    try:
+        if action == "add":
+            if not service:
+                return "Error: service is required for add."
+            a = add_account(persona, service, email, creds_ref, status, notes)
+            log_persona_action(persona, "account_created", f"{service}: {email}")
+            return f"Account added (id={a['id']}): {service} — {email}"
+
+        elif action == "list":
+            accounts = list_accounts(persona)
+            if not accounts:
+                return f"No accounts for persona '{persona}'."
+            lines = []
+            for a in accounts:
+                lines.append(f"[{a['id']}] {a['service']}: {a['email']} (status: {a['status']}, creds: {a['creds_ref'] or 'none'})")
+            return "\n".join(lines)
+
+        elif action == "update":
+            if not account_id:
+                return "Error: account_id is required for update."
+            kwargs = {}
+            if service:
+                kwargs["service"] = service
+            if email:
+                kwargs["email"] = email
+            if creds_ref:
+                kwargs["creds_ref"] = creds_ref
+            if status:
+                kwargs["status"] = status
+            if notes:
+                kwargs["notes"] = notes
+            a = update_account(account_id, **kwargs)
+            if not a:
+                return f"Account {account_id} not found."
+            return f"Account {account_id} updated: {a['service']} — {a['email']} ({a['status']})"
+
+        elif action == "delete":
+            if not account_id:
+                return "Error: account_id is required for delete."
+            if delete_account(account_id):
+                return f"Account {account_id} deleted."
+            return f"Account {account_id} not found."
+
+        else:
+            return f"Unknown action '{action}'. Valid: add, list, update, delete."
+    except Exception as e:
+        return f"Error: {e}"
+
+
 # --- Tool Definitions ---
 
 
@@ -328,10 +534,15 @@ async def navvi_start(
         # Remove stopped container with same name
         sh(f"docker rm {cname} 2>/dev/null")
 
-        # Read persona config
-        config = read_persona_yaml(persona)
-        locale = config.get("locale", "en-US")
-        timezone = config.get("timezone", "UTC")
+        # Read persona config from store (fallback to YAML for backwards compat)
+        p = get_persona(persona)
+        if p:
+            locale = p.get("locale", "en-US")
+            timezone = p.get("timezone", "UTC")
+        else:
+            config = read_persona_yaml(persona)
+            locale = config.get("locale", "en-US")
+            timezone = config.get("timezone", "UTC")
 
         # Docker volume for persistent Firefox profile
         volume_name = f"navvi-profile-{persona}"
@@ -374,6 +585,8 @@ async def navvi_start(
                 break
 
         set_mode("local")
+        touch_persona(persona)
+        log_persona_action(persona, "started", f"mode=local, container={cname}")
         health = "healthy" if ready else "starting..."
         return (
             f"Navvi started ({persona}).\n"
@@ -549,12 +762,13 @@ async def navvi_list() -> str:
 @mcp.tool()
 async def navvi_open(url: str, persona: str = "") -> str:
     """Navigate to a URL in the active browser. After navigating, use navvi_find to locate elements on the page, then navvi_click/navvi_fill to interact."""
-    _, api_base = resolve_persona(persona or None)
+    pname, api_base = resolve_persona(persona or None)
     log_action("open", url)
     try:
         result = await api_call("POST", "/navigate", {"url": url}, api_base)
         title = result.get("title", "(loading...)")
         final_url = result.get("url", url)
+        log_persona_action(pname, "navigate", f"{final_url} — {title}")
         return f"Opened {url}\nTitle: {title}\nURL: {final_url}"
     except Exception as e:
         return f"Error navigating: {e}"
@@ -575,7 +789,7 @@ async def navvi_click(x: int, y: int, persona: str = "") -> str:
 @mcp.tool()
 async def navvi_fill(x: int, y: int, value: str, delay: int = 12, persona: str = "") -> str:
     """Click at (x, y) to focus an input field, then type text using OS-level xdotool. Get coordinates from navvi_find first. Selects existing text (Ctrl+A) before typing to replace any current value."""
-    _, api_base = resolve_persona(persona or None)
+    pname, api_base = resolve_persona(persona or None)
     fill_duration_ms = len(value) * delay
     log_action("fill", {"x": x, "y": y, "text": value, "durationMs": fill_duration_ms})
     try:
@@ -584,6 +798,7 @@ async def navvi_fill(x: int, y: int, value: str, delay: int = 12, persona: str =
         await asyncio.sleep(0.1)
         # Type
         await api_call("POST", "/type", {"text": value, "delay": delay}, api_base)
+        log_persona_action(pname, "fill", f"({x},{y}) {len(value)} chars")
         return f'Filled at ({x}, {y}) with "{value}" ({len(value)} chars)'
     except Exception as e:
         return f"Error: {e}"
