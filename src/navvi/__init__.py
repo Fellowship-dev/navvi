@@ -85,11 +85,16 @@ active_persona: Optional[str] = None
 
 mcp = FastMCP(
     "navvi",
-    version="3.3.0",
+    version="3.4.0",
 )
 
 # Ensure default persona exists on startup
 ensure_default()
+
+# Progressive disclosure: hide atomic tools by default.
+# Journey tools (navvi_browse, navvi_login) handle most interactions.
+# Atomic tools (navvi_click, navvi_find, etc.) are available on demand.
+mcp.disable(tags={"atomic", "recording"})
 
 
 # --- MCP Resources ---
@@ -836,7 +841,7 @@ async def navvi_list() -> str:
     return f"Navvi Codespaces:\n{output}"
 
 
-@mcp.tool()
+@mcp.tool(tags={"atomic"})
 async def navvi_open(url: str, persona: str = "") -> str:
     """Navigate to a URL in the active browser. After navigating, use navvi_find to locate elements on the page, then navvi_click/navvi_fill to interact."""
     pname, api_base = resolve_persona(persona or None)
@@ -851,7 +856,7 @@ async def navvi_open(url: str, persona: str = "") -> str:
         return f"Error navigating: {e}"
 
 
-@mcp.tool()
+@mcp.tool(tags={"atomic"})
 async def navvi_click(x: int, y: int, persona: str = "") -> str:
     """Click at (x, y) screen coordinates using OS-level xdotool input (isTrusted: true). IMPORTANT: Use navvi_find to get coordinates -- it returns screen-ready (x, y) values. Do NOT use raw JS getBoundingClientRect() -- those are viewport coords that miss the browser chrome offset."""
     _, api_base = resolve_persona(persona or None)
@@ -863,7 +868,7 @@ async def navvi_click(x: int, y: int, persona: str = "") -> str:
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(tags={"atomic"})
 async def navvi_fill(x: int, y: int, value: str, delay: int = 12, persona: str = "") -> str:
     """Click at (x, y) to focus an input field, then type text using OS-level xdotool. Get coordinates from navvi_find first. Selects existing text (Ctrl+A) before typing to replace any current value."""
     pname, api_base = resolve_persona(persona or None)
@@ -881,7 +886,7 @@ async def navvi_fill(x: int, y: int, value: str, delay: int = 12, persona: str =
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(tags={"atomic"})
 async def navvi_press(key: str, persona: str = "") -> str:
     """Press a keyboard key (Enter, Tab, Escape, Backspace, ArrowDown, etc.). Sends to currently focused element."""
     _, api_base = resolve_persona(persona or None)
@@ -893,7 +898,7 @@ async def navvi_press(key: str, persona: str = "") -> str:
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(tags={"atomic"})
 async def navvi_drag(
     x1: int, y1: int, x2: int, y2: int,
     steps: int = 20, duration: float = 0.3,
@@ -910,7 +915,7 @@ async def navvi_drag(
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(tags={"atomic"})
 async def navvi_mousedown(x: int, y: int, persona: str = "") -> str:
     """Press and hold mouse button at (x, y). Pair with navvi_mouseup for press-and-hold CAPTCHAs. Get coordinates from navvi_find. WARNING: Arkose Labs/FunCaptcha (Microsoft, Yahoo) cannot be solved inside the container even by a human -- the virtual display is fingerprinted. If you detect arkoselabs/funcaptcha in the page, stop and tell the user to use a real browser for that signup."""
     _, api_base = resolve_persona(persona or None)
@@ -922,7 +927,7 @@ async def navvi_mousedown(x: int, y: int, persona: str = "") -> str:
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(tags={"atomic"})
 async def navvi_mouseup(x: int, y: int, persona: str = "") -> str:
     """Release mouse button at (x, y). Pair with navvi_mousedown."""
     _, api_base = resolve_persona(persona or None)
@@ -934,7 +939,7 @@ async def navvi_mouseup(x: int, y: int, persona: str = "") -> str:
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(tags={"atomic"})
 async def navvi_mousemove(x: int, y: int, persona: str = "") -> str:
     """Move mouse to (x, y) without clicking. Useful for hover effects."""
     _, api_base = resolve_persona(persona or None)
@@ -946,7 +951,7 @@ async def navvi_mousemove(x: int, y: int, persona: str = "") -> str:
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(tags={"atomic"})
 async def navvi_scroll(direction: str = "down", amount: int = 3, persona: str = "") -> str:
     """Scroll the page in a given direction (up, down, left, right)."""
     _, api_base = resolve_persona(persona or None)
@@ -979,7 +984,7 @@ async def navvi_screenshot(persona: str = "") -> str:
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(tags={"atomic"})
 async def navvi_url(persona: str = "") -> str:
     """Get the current page URL."""
     _, api_base = resolve_persona(persona or None)
@@ -1004,7 +1009,7 @@ async def navvi_vnc(persona: str = "") -> str:
     )
 
 
-@mcp.tool()
+@mcp.tool(tags={"atomic"})
 async def navvi_find(selector: str, all: bool = False, persona: str = "") -> str:
     """Find element(s) by CSS selector and return screen-ready (x, y) coordinates. THIS IS THE PRIMARY WAY TO GET COORDINATES -- use before navvi_click, navvi_fill, navvi_drag, navvi_mousedown. Automatically corrects for browser chrome offset. Workflow: navvi_find -> get (x, y) -> navvi_click/navvi_fill at those coords -> navvi_screenshot to verify. For dropdowns: navvi_find the button -> navvi_click to open -> navvi_find the options (selector="[role=option]", all=true) -> navvi_click the desired option."""
     _, api_base = resolve_persona(persona or None)
@@ -1048,7 +1053,7 @@ async def navvi_find(selector: str, all: bool = False, persona: str = "") -> str
         return f"Error: {e}"
 
 
-@mcp.tool()
+@mcp.tool(tags={"atomic"})
 async def navvi_creds(
     action: str,
     entry: str = "",
@@ -1530,6 +1535,26 @@ async def _execute_action(action: dict, api_base: str, dom_elements: list):
                 pass
 
 
+# --- Progressive Disclosure ---
+
+
+@mcp.tool()
+async def navvi_atomic(enable: bool = True) -> str:
+    """Enable or disable atomic browser tools (navvi_click, navvi_find, navvi_fill, etc.).
+
+    Atomic tools are hidden by default — use navvi_browse for most tasks.
+    Enable atomic tools only when navvi_browse asks for guidance or you need fine-grained control.
+
+    Example: navvi_atomic(enable=true) → reveals 12 low-level tools
+    """
+    if enable:
+        mcp.enable(tags={"atomic"})
+        return "Atomic tools enabled: navvi_open, navvi_find, navvi_click, navvi_fill, navvi_press, navvi_scroll, navvi_drag, navvi_mousedown, navvi_mouseup, navvi_mousemove, navvi_url, navvi_creds."
+    else:
+        mcp.disable(tags={"atomic"})
+        return "Atomic tools hidden. Use navvi_browse for browser interactions."
+
+
 # --- Journey Tools ---
 
 
@@ -1540,21 +1565,17 @@ async def navvi_browse(
     max_steps: int = 10,
     persona: str = "",
 ) -> str:
-    """Browse the web autonomously — navigate, interact, and report results.
+    """PRIMARY BROWSING TOOL — use this for ANY web interaction instead of manually calling navvi_open, navvi_find, navvi_click, navvi_fill. Give a natural language instruction and optional URL; it handles navigation, element finding, clicking, typing, and screenshots internally.
 
-    Give a natural language instruction like:
-    - "Search DuckDuckGo for 'Python FastMCP' and list the top 3 results"
-    - "Go to github.com/Fellowship-dev/navvi and tell me the star count"
-    - "Accept cookie banners on example.com and screenshot the clean page"
+    Examples:
+    - navvi_browse(instruction="search for 'Python FastMCP'", url="https://duckduckgo.com")
+    - navvi_browse(instruction="click the first link in the results")
+    - navvi_browse(instruction="accept cookie banners and screenshot the clean page", url="https://example.com")
+    - navvi_browse(instruction="read the inbox and list unread emails", url="https://app.tuta.com")
 
-    The tool will:
-    1. Navigate to the URL (or search for it)
-    2. Analyze each page via screenshot
-    3. Take actions (click, fill, scroll) to achieve the goal
-    4. Return results with screenshots
+    Handles cookie banners, login detection, CAPTCHAs (escalates to VNC), and multi-step flows automatically. Returns screenshots and a step-by-step log.
 
-    Uses vision analysis when ANTHROPIC_API_KEY is available (Haiku, ~$0.002/step).
-    Falls back to heuristics + client guidance without it.
+    Only fall back to atomic tools (navvi_open, navvi_find, navvi_click) if this tool explicitly asks for guidance.
     """
     from navvi.vision import analyze
 
@@ -1664,12 +1685,13 @@ async def navvi_browse(
 
 @mcp.tool(tags={"journey"})
 async def navvi_login(service: str, persona: str = "default") -> str:
-    """Log into a service using stored credentials.
+    """Log into a service using stored credentials — use this instead of manually navigating to a login page and calling navvi_creds autofill.
 
-    Reads credentials from gopass (via navvi_creds), navigates to the service's
-    login page, fills in the form, and verifies login success.
+    Give it a service name (e.g. "tuta.com", "github.com") and it reads gopass credentials, navigates to the login page, fills the form, submits, and verifies login success. Handles 2FA by providing a VNC URL for human intervention.
 
-    If 2FA is required, returns the VNC URL for human intervention.
+    Example: navvi_login(service="tuta.com", persona="default")
+
+    Requires: an account registered via navvi_account with a creds_ref pointing to a gopass entry.
     """
     pname, api_base = resolve_persona(persona or None)
 
