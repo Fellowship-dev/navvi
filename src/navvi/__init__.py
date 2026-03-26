@@ -85,7 +85,7 @@ active_persona: Optional[str] = None
 
 mcp = FastMCP(
     "navvi",
-    version="3.6.0",
+    version="3.7.0",
 )
 
 # Ensure default persona exists on startup
@@ -428,8 +428,7 @@ def format_missing(missing: list) -> str:
 def resolve_persona(persona: Optional[str] = None) -> tuple:
     """Resolve which persona to target and return (name, api_base_url)."""
     name = persona or active_persona or "default"
-    ports = get_container_ports(name)
-    return name, f"http://127.0.0.1:{ports['api']}"
+    return name, navvi_api or "http://127.0.0.1:{}".format(NAVVI_PORT)
 
 
 # --- Persona & Account Tools ---
@@ -513,7 +512,7 @@ async def navvi_persona(
             if name == "default":
                 return "Error: cannot delete the default persona."
             if delete_persona(name):
-                return f"Persona '{name}' deleted. Docker volumes preserved (remove manually with: docker volume rm navvi-profile-{name} navvi-gpg-{name} navvi-gopass-{name})."
+                return "Persona '{}' deleted. Gopass credentials namespaced under navvi/{} are preserved in the shared vault.".format(name, name)
             return f"Persona '{name}' not found."
 
         else:
@@ -607,20 +606,23 @@ async def navvi_start(
         if missing:
             return format_missing(missing)
 
-        cname = container_name(persona)
+        # Single container for all personas — always named navvi-default
+        cname = "navvi-default"
 
         # Check if already running
-        existing = sh(f'docker ps -q --filter "name={cname}" 2>/dev/null')
+        existing = sh('docker ps -q --filter "name=navvi-default" 2>/dev/null')
         if existing:
-            ports = get_container_ports(persona)
-            reachable = is_api_reachable(ports["api"])
+            reachable = is_api_reachable(NAVVI_PORT)
             active_persona = persona
-            navvi_api = f"http://127.0.0.1:{ports['api']}"
+            navvi_api = "http://127.0.0.1:{}".format(NAVVI_PORT)
+            touch_persona(persona)
             health = "healthy" if reachable else "starting..."
-            return f"Container {cname} already running.\nAPI: http://127.0.0.1:{ports['api']} ({health})\nVNC: http://127.0.0.1:{ports['vnc']}"
+            return "Navvi running. Switched to persona '{}'.\nAPI: http://127.0.0.1:{} ({})\nVNC: http://127.0.0.1:{}".format(
+                persona, NAVVI_PORT, health, VNC_PORT,
+            )
 
         # Remove stopped container with same name
-        sh(f"docker rm {cname} 2>/dev/null")
+        sh("docker rm navvi-default 2>/dev/null")
 
         # Read persona config from store (fallback to YAML for backwards compat)
         p = get_persona(persona)
@@ -632,62 +634,60 @@ async def navvi_start(
             locale = config.get("locale", "en-US")
             timezone = config.get("timezone", "UTC")
 
-        # Docker volumes for persistent state
-        volume_name = f"navvi-profile-{persona}"
-        gpg_volume = f"navvi-gpg-{persona}"
-        gopass_volume = f"navvi-gopass-{persona}"
-
-        # Find ports
-        api_port = NAVVI_PORT
-        vnc_port = VNC_PORT
-        if persona != "default":
-            h = 0
-            for ch in persona:
-                h = ((h << 5) - h + ord(ch)) & 0xFFFFFFFF
-            offset = (h % 100) + 1
-            api_port = NAVVI_PORT + offset
-            vnc_port = VNC_PORT + offset
-
+        # Shared volumes — one set for all personas
+        # Firefox profile, GPG key, and gopass vault are shared
+        # Credentials are namespaced by persona: navvi/{persona}/{service}
         docker_args = [
             "run", "-d",
             "--name", cname,
-            "-p", f"{api_port}:8024",
-            "-p", f"{vnc_port}:6080",
-            "-v", f"{volume_name}:/home/user/.mozilla",
-            "-v", f"{gpg_volume}:/home/user/.gnupg",
-            "-v", f"{gopass_volume}:/home/user/.local/share/gopass",
-            "-e", f"LOCALE={locale}",
-            "-e", f"TIMEZONE={timezone}",
-            DOCKER_IMAGE,
+            "-p", "{}:8024".format(NAVVI_PORT),
+            "-p", "{}:6080".format(VNC_PORT),
+            "-v", "navvi-profile:/home/user/.mozilla",
+            "-v", "navvi-gpg:/home/user/.gnupg",
+            "-v", "navvi-gopass:/home/user/.local/share/gopass",
+            "-e", "LOCALE={}".format(locale),
+            "-e", "TIMEZONE={}".format(timezone),
         ]
 
-        result = sh(f"docker {' '.join(docker_args)}")
+        # Pass GPG passphrase if available
+        gpg_pass = os.environ.get("NAVVI_GPG_PASSPHRASE")
+        if gpg_pass:
+            docker_args.extend(["-e", "NAVVI_GPG_PASSPHRASE={}".format(gpg_pass)])
+
+        # Pass GPG private key if available
+        gpg_key = os.environ.get("GPG_PRIVATE_KEY")
+        if gpg_key:
+            docker_args.extend(["-e", "GPG_PRIVATE_KEY={}".format(gpg_key)])
+
+        docker_args.append(DOCKER_IMAGE)
+
+        result = sh("docker {}".format(" ".join(docker_args)))
         if "Error" in result or "error" in result:
-            return f"Failed to start container:\n{result}\n\nMake sure the image is built: docker build -t navvi container/"
+            return "Failed to start container:\n{}\n\nMake sure the image is built: docker build -t navvi container/".format(result)
 
         # Wait for API
         active_persona = persona
-        navvi_api = f"http://127.0.0.1:{api_port}"
+        navvi_api = "http://127.0.0.1:{}".format(NAVVI_PORT)
 
         ready = False
         for _ in range(15):
             await asyncio.sleep(1)
-            if is_api_reachable(api_port):
+            if is_api_reachable(NAVVI_PORT):
                 ready = True
                 break
 
         set_mode("local")
         touch_persona(persona)
-        log_persona_action(persona, "started", f"mode=local, container={cname}")
+        log_persona_action(persona, "started", "mode=local, persona={}".format(persona))
         health = "healthy" if ready else "starting..."
         return (
-            f"Navvi started ({persona}).\n"
-            f"Container: {cname}\n"
-            f"API: http://127.0.0.1:{api_port} ({health})\n"
-            f"VNC: http://127.0.0.1:{vnc_port}\n"
-            f"Volume: {volume_name} (persistent Firefox profile)\n\n"
-            f"Use navvi_open to navigate, navvi_screenshot to see the page."
-        )
+            "Navvi started (persona: {}).\n"
+            "Container: {}\n"
+            "API: http://127.0.0.1:{} ({})\n"
+            "VNC: http://127.0.0.1:{}\n"
+            "Volumes: navvi-profile, navvi-gpg, navvi-gopass (shared, persistent)\n\n"
+            "Use navvi_browse for browsing, navvi_screenshot to verify."
+        ).format(persona, cname, NAVVI_PORT, health, VNC_PORT)
 
     if mode == "remote":
         if not REPO:
