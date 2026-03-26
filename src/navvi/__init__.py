@@ -85,7 +85,7 @@ active_persona: Optional[str] = None
 
 mcp = FastMCP(
     "navvi",
-    version="3.4.0",
+    version="3.6.0",
 )
 
 # Ensure default persona exists on startup
@@ -1737,7 +1737,23 @@ async def navvi_browse(
                 summary, shot_path,
             )
 
-        # 7. Execute action
+        # 7. Try reCAPTCHA before aborting
+        if action.get("type") == "abort" and analysis.get("page_type") == "captcha":
+            from navvi.recaptcha import try_recaptcha_checkbox, solve_image_challenge
+            checkbox_result = await try_recaptcha_checkbox(api_call, api_base)
+            if checkbox_result == "passed":
+                steps_log[-1]["action_taken"] = "recaptcha_checkbox_passed"
+                steps_log[-1]["description"] = "reCAPTCHA checkbox passed"
+                continue
+            elif checkbox_result == "challenge":
+                solve_result = await solve_image_challenge(api_call, api_base)
+                if solve_result == "solved":
+                    steps_log[-1]["action_taken"] = "recaptcha_challenge_solved"
+                    steps_log[-1]["description"] = "reCAPTCHA image challenge solved"
+                    continue
+                # Fall through to abort if failed/no_vision
+
+        # 8. Execute action or abort
         if action.get("type") == "abort":
             reason = action.get("target", "unknown reason")
             log_persona_action(pname, "browse_abort", reason)

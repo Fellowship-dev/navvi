@@ -102,14 +102,25 @@ def classify_page(dom_elements: list, url: str = "", title: str = "") -> dict:
 
     # Priority-based classification
     if detected["captcha"]:
+        # Distinguish reCAPTCHA (solvable) from Arkose/hCaptcha (not solvable)
+        captcha_type = "unknown"
+        if captcha_iframe:
+            src = captcha_iframe.get("src", "").lower() if captcha_iframe.get("src") else ""
+            if "recaptcha" in src:
+                captcha_type = "recaptcha"
+            elif "arkoselabs" in src or "funcaptcha" in src:
+                captcha_type = "arkose"
+            elif "hcaptcha" in src:
+                captcha_type = "hcaptcha"
         return {
             "page_type": "captcha",
             "confidence": 0.9,
             "suggested_action": {
                 "type": "abort",
-                "target": "CAPTCHA detected — cannot solve automatically",
+                "target": "CAPTCHA detected ({}) — will attempt auto-solve for reCAPTCHA".format(captcha_type),
             },
             "detected_elements": detected,
+            "captcha_type": captcha_type,
         }
 
     if detected["cookie_banner"] and cookie_button:
