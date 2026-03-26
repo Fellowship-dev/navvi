@@ -11,6 +11,7 @@
 </p>
 
 <p align="center">
+  <a href="https://pypi.org/project/navvi/"><img src="https://img.shields.io/pypi/v/navvi" alt="PyPI" /></a>
   <a href="#quick-start">Quick Start</a> &middot;
   <a href="#use-cases">Use Cases</a> &middot;
   <a href="#how-it-works">How It Works</a> &middot;
@@ -36,9 +37,10 @@ Navvi gives your agent a persistent browser with its own identity. A [Camoufox](
 
 - **Persistent sessions** &mdash; cookies, logins, and history survive restarts
 - **Credential vault** &mdash; passwords stored in [gopass](https://github.com/gopasspw/gopass), auto-filled into forms without the AI ever seeing them
-- **Undetectable input** &mdash; OS-level mouse and keyboard events (`isTrusted: true`)
+- **Undetectable input** &mdash; OS-level mouse and keyboard events (`isTrusted: true`), `navigator.webdriver = false`
 - **Live view** &mdash; VNC link for when a human needs to step in (CAPTCHAs, OAuth, 2FA)
-- **21 MCP tools** &mdash; drop into any Claude Code project
+- **Persona management** &mdash; create multiple browser identities with accounts, credentials, and action history
+- **MCP-native** &mdash; Resources, Prompts, and progressive disclosure built into the protocol
 
 ## Quick Start
 
@@ -53,7 +55,7 @@ docker build -t navvi:camoufox -f container/Dockerfile container/
 ### 2. Add to Claude Code
 
 ```bash
-claude mcp add navvi -- uvx navvi
+claude mcp add navvi -- uvx navvi@latest
 ```
 
 Or add to your project's `.mcp.json`:
@@ -63,37 +65,52 @@ Or add to your project's `.mcp.json`:
   "mcpServers": {
     "navvi": {
       "command": "uvx",
-      "args": ["navvi"]
+      "args": ["navvi@latest"]
     }
   }
 }
 ```
 
-Restart Claude Code and your agent has 21 browser tools.
-
 ### 3. Use
 
-```
-navvi_start                                     → spin up a browser
-navvi_open url=https://example.com              → navigate
-navvi_find selector="input[type=email]"         → locate element → (x, y)
-navvi_fill x=512 y=498 value="me@example.com"  → type into it
-navvi_screenshot                                → see what happened
-```
-
-Or log in using stored credentials (password never visible to the AI):
+Just tell your agent what to do:
 
 ```
-navvi_creds action=list                         → show stored logins
-navvi_creds action=autofill entry=default/gmail  → fill username + password
-navvi_press key=Enter                           → submit
+"Search DuckDuckGo for 'navvi browser' and list the top results"
+"Log into Tutanota with stored credentials"
+"Go to github.com/Fellowship-dev/navvi and screenshot the README"
+```
+
+Navvi's journey tools (`navvi_browse`, `navvi_login`) handle navigation, element finding, clicking, typing, and screenshots internally. No manual step-by-step needed.
+
+<details>
+<summary>For fine-grained control: atomic tools</summary>
+
+Atomic tools are hidden by default. Unlock them when you need precise control:
+
+```
+navvi_atomic(enable=true)                          → unlock low-level tools
+navvi_open url=https://example.com                 → navigate
+navvi_find selector="input[type=email]"            → locate element → (x, y)
+navvi_fill x=512 y=498 value="me@example.com"     → type into it
+navvi_screenshot                                   → see what happened
+```
+
+</details>
+
+### 4. Optional: Install Tatl companion
+
+[Tatl](https://github.com/Fellowship-dev/tatl) is a companion skill that gives Claude Code a dedicated browsing subagent &mdash; isolates browser work from your main conversation.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Fellowship-dev/tatl/main/install.sh | bash
 ```
 
 ## Use Cases
 
-**Persistent logins.** Log into a service once &mdash; your agent stays logged in across sessions. No more re-entering credentials, no more expired sessions, no more "please log in again."
+**Persistent logins.** Log into a service once &mdash; your agent stays logged in across sessions. No more re-entering credentials, no more expired sessions.
 
-**Secure credential management.** Passwords live in gopass inside the container. The `autofill` action types them directly into the browser &mdash; the AI never sees the raw password in its context.
+**Secure credential management.** Passwords live in gopass inside the container. The `autofill` action types them directly into the browser &mdash; the AI never sees the raw password.
 
 **Visual evidence for PRs.** Screenshot your staging app before and after a code change. Record a user flow as a GIF. Attach it to the pull request.
 
@@ -108,14 +125,14 @@ Your AI agent (Claude Code, etc.)
     |
     | MCP protocol (stdio)
     v
-  navvi (FastMCP, Python)
+  navvi (FastMCP, Python — via uvx)
     |
     | HTTP → localhost:8024
     v
 +--------------------------------------+
 |  Docker container                    |
 |                                      |
-|  Firefox  ←  Marionette (navigate)   |
+|  Camoufox ←  Marionette (navigate)  |
 |     |                                |
 |  Xvfb     ←  xdotool (click, type)  |
 |     |                                |
@@ -127,83 +144,122 @@ Your AI agent (Claude Code, etc.)
     |
     v
   Docker volume (persistent profile)
+  ~/.navvi/navvi.db (persona state)
 ```
 
-**Navigation** uses Firefox Marionette &mdash; a built-in protocol with no detectable automation markers.
+**Anti-detection** uses [Camoufox](https://github.com/daijro/camoufox) &mdash; a patched Firefox with fingerprint masking at the C++ level. `navigator.webdriver` returns `false`.
 
 **All input** uses xdotool &mdash; OS-level events that websites cannot distinguish from a real person.
 
-**Credentials** are stored in gopass inside the container. The `autofill` action reads gopass and types directly into Firefox &mdash; the password travels from vault to browser, never through the AI.
+**Credentials** are stored in gopass inside the container. The `autofill` action reads gopass and types directly into the browser &mdash; the password never travels through the AI.
 
-**Profiles persist** in Docker named volumes. Stop a container, start it next week &mdash; still logged in.
+**Personas** persist in Docker named volumes (browser profiles) and SQLite (config, accounts, action logs).
 
 ## MCP Tools
+
+By default, Navvi shows 11 high-level tools. Atomic tools unlock on demand.
+
+### Journey tools (default)
+
+| Tool | What it does |
+|------|-------------|
+| `navvi_browse` | **Primary tool** &mdash; give it an instruction + URL, it handles everything |
+| `navvi_login` | Log into a service using stored gopass credentials |
+
+### Lifecycle
 
 | Tool | What it does |
 |------|-------------|
 | `navvi_start` | Start a browser container for a persona |
 | `navvi_stop` | Stop container (profile preserved) |
-| `navvi_open` | Navigate to a URL |
-| `navvi_find` | Find element by CSS selector &rarr; screen coordinates |
-| `navvi_click` | Click at (x, y) |
-| `navvi_fill` | Click + type text into a field |
-| `navvi_press` | Press a key (Enter, Tab, Escape...) |
-| `navvi_scroll` | Scroll the page |
-| `navvi_drag` | Drag from point A to point B |
-| `navvi_mousedown` | Press and hold |
-| `navvi_mouseup` | Release mouse button |
-| `navvi_mousemove` | Move mouse without clicking |
+| `navvi_status` | Show running containers and health |
+
+### Observation
+
+| Tool | What it does |
+|------|-------------|
 | `navvi_screenshot` | Capture the screen |
-| `navvi_creds` | List, get metadata, or autofill credentials from gopass |
-| `navvi_vnc` | Get live view URL for human handoff |
+| `navvi_vnc` | Get live VNC URL for human handoff |
+
+### Persona management
+
+| Tool | What it does |
+|------|-------------|
+| `navvi_persona` | Create, update, list, delete browser personas |
+| `navvi_account` | Track accounts per persona (service, email, gopass ref) |
+
+### Progressive disclosure
+
+| Tool | What it does |
+|------|-------------|
+| `navvi_atomic` | Unlock/hide 12 low-level tools (click, find, fill, etc.) |
+
+<details>
+<summary>Atomic tools (hidden by default)</summary>
+
+| Tool | What it does |
+|------|-------------|
+| `navvi_open` | Navigate to a URL |
+| `navvi_find` | Find element by CSS selector &rarr; screen (x, y) |
+| `navvi_click` | Click at coordinates |
+| `navvi_fill` | Click + type text |
+| `navvi_press` | Press a key |
+| `navvi_scroll` | Scroll the page |
+| `navvi_drag` | Drag between two points |
+| `navvi_mousedown/up/move` | Low-level mouse control |
 | `navvi_url` | Get current page URL |
-| `navvi_record_start` | Start recording a video |
-| `navvi_record_stop` | Stop and assemble MP4 |
-| `navvi_record_gif` | Convert recording to GIF |
-| `navvi_status` | Show running containers |
+| `navvi_creds` | List, get, or autofill gopass credentials |
 | `navvi_list` | List available Codespaces (remote mode) |
 
-### Key Workflow
+</details>
 
-`navvi_find` is the primary way to get coordinates. It returns screen-ready `(x, y)` values that account for browser chrome. Pass them directly to `navvi_click` or `navvi_fill`.
+### Recording tools (hidden by default)
 
-```
-navvi_find("button[type=submit]")  →  { x: 512, y: 563, text: "Log in" }
-navvi_click(x=512, y=563)
-```
+| Tool | What it does |
+|------|-------------|
+| `navvi_record_start` | Start recording screenshots |
+| `navvi_record_stop` | Assemble MP4 |
+| `navvi_record_gif` | Convert to GIF |
 
-For dropdowns: `navvi_find` the button &rarr; `navvi_click` to open &rarr; `navvi_find` the options &rarr; `navvi_click` the one you want.
+## MCP Resources
 
-### When Your Agent Needs Help
+Read persona state without tool calls:
 
-Some sites require human intervention (CAPTCHAs, OAuth consent, 2FA codes). The agent asks for help:
+| URI | What it returns |
+|-----|----------------|
+| `personas://list` | All personas with account counts |
+| `persona://{name}/state` | Config, accounts, recent actions |
+| `persona://{name}/accounts` | Account details |
+| `audit://{name}/log` | Last 20 actions |
 
-```
-navvi_vnc()  →  http://127.0.0.1:6080/vnc.html?autoconnect=true
-```
+## MCP Prompts
 
-Open the URL, do what the agent can't, and it picks up where you left off.
+Structured workflows available as prompt templates:
+
+| Prompt | What it does |
+|--------|-------------|
+| `signup_flow` | Step-by-step account creation on a service |
+| `login_flow` | Log in using stored credentials |
+| `qa_walk` | Walk a page for QA &mdash; screenshot, find issues, report |
 
 ## Personas
 
-Each persona is a separate browser identity with its own cookies, credentials, and history.
+Each persona is a separate browser identity with its own cookies, credentials, and history. Managed via MCP tools:
 
-```yaml
-# personas/default.yaml
-name: default
-description: Default browser persona
-browser:
-  locale: en-US
-  timezone: America/Santiago
+```
+navvi_persona(action="create", name="mybot", description="GitHub admin", stealth="high")
+navvi_persona(action="list")
+navvi_account(action="add", persona="mybot", service="github.com", email="bot@x.com")
 ```
 
-Personas are backed by Docker named volumes (`navvi-profile-<name>`). Create as many as you need &mdash; one for each service, project, or team member.
+Persona config and state live in `~/.navvi/navvi.db`. Browser profiles persist in Docker named volumes (`navvi-profile-<name>`).
 
 ## Requirements
 
 - **Docker** &mdash; the browser runs in a container
 - **uv** &mdash; `curl -LsSf https://astral.sh/uv/install.sh | sh` (or `brew install uv`)
 - **ffmpeg** (optional) &mdash; only needed for video recording
+- **ANTHROPIC_API_KEY** (optional) &mdash; enables Haiku vision for `navvi_browse` ($0.002/step). Without it, falls back to heuristics.
 
 ## License
 
