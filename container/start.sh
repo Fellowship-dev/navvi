@@ -47,8 +47,10 @@ if [ -d "/workspaces/.codespaces/.persistedshare" ]; then
   fi
 fi
 
-# --- Gopass init (opt-in: provide GPG_PRIVATE_KEY env var) ---
+# --- Gopass init ---
+# Priority: 1) GPG_PRIVATE_KEY (pre-existing key), 2) existing key in volume, 3) NAVVI_GPG_PASSPHRASE (generate new)
 if [ -n "${GPG_PRIVATE_KEY:-}" ]; then
+  # User provided a pre-existing GPG key
   echo "[navvi] Importing GPG key for gopass..."
   echo "$GPG_PRIVATE_KEY" | gpg --batch --import 2>/dev/null
   GPG_ID=$(gpg --list-secret-keys --keyid-format long 2>/dev/null | grep sec | head -1 | awk '{print $2}' | cut -d/ -f2)
@@ -57,26 +59,30 @@ if [ -n "${GPG_PRIVATE_KEY:-}" ]; then
     if [ ! -d "$HOME/.local/share/gopass/stores/root" ]; then
       gopass init --path "$HOME/.local/share/gopass/stores/root" "$GPG_ID" 2>/dev/null
     fi
-    echo "[navvi] Gopass ready (key: ${GPG_ID:0:8}...)"
+    echo "[navvi] Gopass ready (imported key: ${GPG_ID:0:8}...)"
   fi
   unset GPG_PRIVATE_KEY
 elif [ -n "$(gpg --list-secret-keys 2>/dev/null)" ]; then
-  # Existing key from persistent volume (Docker volumes or Codespaces)
+  # Existing key from persistent volume (survives container restarts)
   GPG_ID=$(gpg --list-secret-keys --keyid-format long 2>/dev/null | grep sec | head -1 | awk '{print $2}' | cut -d/ -f2)
   if [ -n "$GPG_ID" ] && [ ! -d "$HOME/.local/share/gopass/stores/root" ]; then
     gopass init --path "$HOME/.local/share/gopass/stores/root" "$GPG_ID" 2>/dev/null
   fi
   echo "[navvi] Gopass ready (existing key: ${GPG_ID:0:8}...)"
+elif [ -n "${NAVVI_GPG_PASSPHRASE:-}" ]; then
+  # Generate a new GPG key protected by the user's passphrase
+  echo "[navvi] Generating GPG key for gopass (first boot)..."
+  gpg --batch --passphrase "$NAVVI_GPG_PASSPHRASE" --quick-generate-key "Navvi <navvi@local>" rsa2048 default never 2>/dev/null
+  GPG_ID=$(gpg --list-secret-keys --keyid-format long 2>/dev/null | grep sec | head -1 | awk '{print $2}' | cut -d/ -f2)
+  if [ -n "$GPG_ID" ]; then
+    echo "${GPG_ID}:6:" | gpg --import-ownertrust 2>/dev/null
+    gopass init --path "$HOME/.local/share/gopass/stores/root" "$GPG_ID" 2>/dev/null
+    echo "[navvi] Gopass ready (new key: ${GPG_ID:0:8}..., protected by NAVVI_GPG_PASSPHRASE)"
+    echo "[navvi] IMPORTANT: Keep your NAVVI_GPG_PASSPHRASE safe — you need it to recover credentials."
+  fi
 else
-  echo ""
-  echo "[navvi] WARNING: No GPG key found. Gopass credential vault is DISABLED."
-  echo "[navvi] To enable secure credential management:"
-  echo "[navvi]   1. Generate a GPG key:  gpg --batch --passphrase '' --quick-generate-key 'Navvi <navvi@local>' rsa2048 default never"
-  echo "[navvi]   2. Export it:           gpg --export-secret-keys --armor navvi@local > navvi-gpg.key"
-  echo "[navvi]   3. Pass to container:   docker run -e GPG_PRIVATE_KEY=\"\$(cat navvi-gpg.key)\" ..."
-  echo "[navvi]   Or add to .mcp.json env: \"GPG_PRIVATE_KEY\": \"<your-key>\""
-  echo "[navvi] Without this, navvi_creds generate/autofill/import will not work."
-  echo ""
+  echo "[navvi] Gopass disabled — set NAVVI_GPG_PASSPHRASE in your .mcp.json env to enable credential management."
+  echo "[navvi]   Example: \"NAVVI_GPG_PASSPHRASE\": \"any-random-string-here\""
 fi
 
 # --- Graceful shutdown ---
