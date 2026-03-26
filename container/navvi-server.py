@@ -80,6 +80,19 @@ class CredsGetRequest(BaseModel):
     entry: str
     field: str  # e.g. "username", "url", "email" — NOT "password"
 
+class CredsGenerateRequest(BaseModel):
+    entry: str  # gopass entry path, e.g. "navvi/fry-lobster/hn"
+    username: str  # username to store alongside the generated password
+    length: int = 24  # password length
+
+class CredsImportEntry(BaseModel):
+    entry: str
+    username: str
+    password: str
+
+class CredsImportRequest(BaseModel):
+    credentials: list[CredsImportEntry]
+
 
 # --- Helpers ---
 
@@ -622,6 +635,81 @@ async def creds_autofill(req: CredsAutofillRequest):
         "password_at": [px, py],
         "note": "Password was typed directly into the browser — it never appeared in this response."
     }
+
+
+@app.post("/creds/generate")
+async def creds_generate(req: CredsGenerateRequest):
+    """Generate a random password inside the container and store it in gopass.
+
+    The password is NEVER returned in the response — it goes directly into
+    gopass and can only reach the browser via /creds/autofill.
+    """
+    if req.length < 12 or req.length > 128:
+        raise HTTPException(status_code=400, detail="Length must be between 12 and 128")
+
+    # Check if entry already exists
+    try:
+        existing = run_gopass("ls --flat")
+        if req.entry in existing.splitlines():
+            raise HTTPException(status_code=409, detail=f"Entry '{req.entry}' already exists. Delete it first or use a different name.")
+    except RuntimeError:
+        pass  # Empty store, that's fine
+
+    try:
+        # Generate password (cryptic, no symbols — better form compat)
+        # gopass generate creates the entry with a random password
+        run_gopass(f"generate -f {shlex.quote(req.entry)} {req.length}", timeout=10.0)
+
+        # Add username as a named field
+        # gopass insert appends key-value pairs below the password line
+        proc = subprocess.run(
+            f"echo 'username: {shlex.quote(req.username)}' | gopass insert -a {shlex.quote(req.entry)}",
+            shell=True, capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr.strip())
+
+        return {
+            "ok": True,
+            "entry": req.entry,
+            "length": req.length,
+            "username": req.username,
+            "note": "Password generated and stored in gopass. It was NOT included in this response. Use /creds/autofill to fill it into a form."
+        }
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=f"gopass error: {e}")
+
+
+@app.post("/creds/import")
+async def creds_import(req: CredsImportRequest):
+    """Import credentials into gopass. Passwords appear briefly in the request
+    body (localhost only) but are NEVER echoed back in the response.
+    """
+    if not req.credentials:
+        raise HTTPException(status_code=400, detail="No credentials provided")
+
+    imported = 0
+    errors = []
+
+    for cred in req.credentials:
+        try:
+            # Create entry with password on first line + username field
+            payload = f"{cred.password}\nusername: {cred.username}"
+            proc = subprocess.run(
+                f"echo {shlex.quote(payload)} | gopass insert -m {shlex.quote(cred.entry)}",
+                shell=True, capture_output=True, text=True, timeout=10,
+            )
+            if proc.returncode != 0:
+                errors.append({"entry": cred.entry, "error": proc.stderr.strip()})
+            else:
+                imported += 1
+        except Exception as e:
+            errors.append({"entry": cred.entry, "error": str(e)})
+
+    result = {"ok": len(errors) == 0, "imported": imported}
+    if errors:
+        result["errors"] = errors
+    return result
 
 
 # --- Startup ---

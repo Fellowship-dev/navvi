@@ -151,12 +151,18 @@ def signup_flow(service: str, persona: str = "default") -> str:
         f"Steps:\n"
         f"1. Read persona://{persona}/state to check if an account already exists on {service}\n"
         f"2. If account exists, skip — report it and stop\n"
-        f"3. Navigate to {service} signup page\n"
-        f"4. Fill the signup form using navvi_find + navvi_fill\n"
-        f"5. Take a screenshot to verify each step\n"
-        f"6. If you hit a CAPTCHA you can't solve, call navvi_vnc and ask the user to solve it\n"
-        f"7. On success, use navvi_account to log the new account (service, email, gopass ref)\n"
-        f"8. Store credentials in gopass via navvi_creds\n"
+        f"3. Generate credentials: navvi_creds(action='generate', entry='navvi/{persona}/{service}', username='<chosen_username>')\n"
+        f"   Password is created inside the container and NEVER appears in your context.\n"
+        f"4. Navigate to {service} signup page\n"
+        f"5. Fill the signup form: navvi_creds(action='autofill', entry='navvi/{persona}/{service}')\n"
+        f"   If autofill fails (non-standard form), use navvi_find + navvi_fill for username only.\n"
+        f"   For the password, use autofill or escalate to VNC — never type it manually.\n"
+        f"6. Take a screenshot to verify the form is filled correctly\n"
+        f"7. Submit the form (click submit button or press Enter)\n"
+        f"8. If you hit a reCAPTCHA, try clicking the checkbox (iframe[title*=reCAPTCHA]) up to 3 times.\n"
+        f"   If an image challenge appears or 3 attempts fail, call navvi_vnc for human help.\n"
+        f"9. Take a screenshot to verify account creation succeeded\n"
+        f"10. Register the account: navvi_account(action='add', persona='{persona}', service='{service}', creds_ref='gopass://navvi/{persona}/{service}')\n"
     )
 
 
@@ -1062,11 +1068,23 @@ async def navvi_creds(
     action: str,
     entry: str = "",
     field: str = "",
+    username: str = "",
+    length: int = 24,
+    file_path: str = "",
     username_selector: str = "",
     password_selector: str = "",
     persona: str = "",
 ) -> str:
-    """Manage credentials stored in gopass inside the container. Three actions: "list" shows available entries (no secrets), "get" retrieves a non-secret field (username, url, email -- refuses password), "autofill" reads gopass and fills the login form directly -- the password goes from gopass -> xdotool -> browser, NEVER appearing in this response. Use autofill after navvi_open navigates to a login page."""
+    """Manage credentials stored in gopass inside the container. Five actions:
+
+    - "list": show available entries (no secrets)
+    - "get": retrieve a non-secret field (username, url, email — refuses password)
+    - "generate": create a new credential with a random password that NEVER leaves the container.
+      Requires entry + username. Optional length (default 24). Use this for signups.
+    - "import": bulk-import credentials from a JSON file on the host. Requires file_path pointing
+      to a JSON array of {entry, username, password} objects. File is read and deleted after import.
+    - "autofill": fill a login form from gopass — password goes gopass → xdotool → browser, NEVER in this response.
+    """
     _, api_base = resolve_persona(persona or None)
 
     if action == "list":
@@ -1074,7 +1092,7 @@ async def navvi_creds(
             result = await api_call("GET", "/creds/list", api_base=api_base)
             entries = result.get("entries", [])
             if not entries:
-                return "No credentials stored in gopass. Use gopass to add entries."
+                return "No credentials stored in gopass. Use navvi_creds(action='generate') or navvi_creds(action='import') to add entries."
             output = f"Credentials ({result.get('count', len(entries))} entries):\n"
             for e in entries:
                 output += f"  {e}\n"
@@ -1090,6 +1108,58 @@ async def navvi_creds(
         try:
             result = await api_call("POST", "/creds/get", {"entry": entry, "field": field}, api_base)
             return f"{field}: {result.get('value', '')}"
+        except Exception as e:
+            return f"Error: {e}"
+
+    if action == "generate":
+        if not entry:
+            return 'Error: "entry" is required for generate action.'
+        if not username:
+            return 'Error: "username" is required for generate action.'
+        log_action("creds_generated", entry)
+        try:
+            result = await api_call("POST", "/creds/generate", {
+                "entry": entry, "username": username, "length": length,
+            }, api_base)
+            return (
+                f"Credential stored: gopass://{entry} ({length} chars)\n"
+                f"Username: {username}\n\n"
+                f"Password was generated inside the container and NEVER appeared in this response.\n"
+                f"Use navvi_creds(action='autofill', entry='{entry}') to fill it into a form."
+            )
+        except Exception as e:
+            return f"Error: {e}"
+
+    if action == "import":
+        if not file_path:
+            return 'Error: "file_path" is required for import action. Point to a JSON file with [{entry, username, password}, ...].'
+        import json as _json
+        try:
+            with open(file_path, "r") as f:
+                creds = _json.load(f)
+            if not isinstance(creds, list):
+                return "Error: JSON file must contain an array of {entry, username, password} objects."
+        except FileNotFoundError:
+            return f"Error: File not found: {file_path}"
+        except _json.JSONDecodeError as e:
+            return f"Error: Invalid JSON: {e}"
+
+        log_action("creds_imported", f"{len(creds)} entries from {file_path}")
+        try:
+            result = await api_call("POST", "/creds/import", {"credentials": creds}, api_base)
+            # Delete the file after successful import
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+            imported = result.get("imported", 0)
+            errors = result.get("errors", [])
+            output = f"Imported {imported} credential(s). Source file deleted."
+            if errors:
+                output += f"\n\nErrors ({len(errors)}):"
+                for err in errors:
+                    output += f"\n  {err['entry']}: {err['error']}"
+            return output
         except Exception as e:
             return f"Error: {e}"
 
@@ -1116,7 +1186,7 @@ async def navvi_creds(
         except Exception as e:
             return f"Error: {e}"
 
-    return 'Error: action must be "list", "get", or "autofill".'
+    return 'Error: action must be "list", "get", "generate", "import", or "autofill".'
 
 
 @mcp.tool(tags={"recording"})

@@ -98,13 +98,15 @@ navvi_screenshot                                   → see what happened
 
 </details>
 
-### 4. Optional: Install Tatl companion
+### 4. Optional: Install companion agents
 
-[Tatl](https://github.com/Fellowship-dev/tatl) is a companion skill that gives Claude Code a dedicated browsing subagent &mdash; isolates browser work from your main conversation.
+Companion agents give Claude Code dedicated browsing subagents &mdash; isolates browser work from your main conversation.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Fellowship-dev/tatl/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Fellowship-dev/navvi/main/install-companions.sh | bash
 ```
+
+This installs `navvi-browse` and `navvi-login` agents into `.claude/agents/`.
 
 ## Use Cases
 
@@ -151,7 +153,10 @@ Your AI agent (Claude Code, etc.)
 
 **All input** uses xdotool &mdash; OS-level events that websites cannot distinguish from a real person.
 
-**Credentials** are stored in gopass inside the container. The `autofill` action reads gopass and types directly into the browser &mdash; the password never travels through the AI.
+**Credentials** are stored in gopass inside the container. Three secure actions:
+- `generate` &mdash; creates a random password inside the container, stores in gopass. The password **never** leaves the container or appears in AI context.
+- `import` &mdash; bulk-import existing credentials from a JSON file on the host. Passwords appear briefly in the localhost request, never in AI context.
+- `autofill` &mdash; reads gopass and types directly into the browser via xdotool. The password never travels through the AI.
 
 **Personas** persist in Docker named volumes (browser profiles) and SQLite (config, accounts, action logs).
 
@@ -208,7 +213,7 @@ By default, Navvi shows 11 high-level tools. Atomic tools unlock on demand.
 | `navvi_drag` | Drag between two points |
 | `navvi_mousedown/up/move` | Low-level mouse control |
 | `navvi_url` | Get current page URL |
-| `navvi_creds` | List, get, or autofill gopass credentials |
+| `navvi_creds` | Manage gopass credentials: list, get, generate, import, autofill |
 | `navvi_list` | List available Codespaces (remote mode) |
 
 </details>
