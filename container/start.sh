@@ -72,7 +72,7 @@ elif [ -n "$(gpg --list-secret-keys 2>/dev/null)" ]; then
 elif [ -n "${NAVVI_GPG_PASSPHRASE:-}" ]; then
   # Generate a new GPG key protected by the user's passphrase
   echo "[navvi] Generating GPG key for gopass (first boot)..."
-  gpg --batch --passphrase "$NAVVI_GPG_PASSPHRASE" --quick-generate-key "Navvi <navvi@local>" rsa2048 default never 2>/dev/null
+  gpg --batch --passphrase "$NAVVI_GPG_PASSPHRASE" --pinentry-mode loopback --quick-generate-key "Navvi <navvi@local>" rsa2048 default never 2>/dev/null
   GPG_ID=$(gpg --list-secret-keys --keyid-format long 2>/dev/null | grep sec | head -1 | awk '{print $2}' | cut -d/ -f2)
   if [ -n "$GPG_ID" ]; then
     echo "${GPG_ID}:6:" | gpg --import-ownertrust 2>/dev/null

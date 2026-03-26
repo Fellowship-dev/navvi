@@ -615,9 +615,25 @@ async def navvi_start(
             reachable = is_api_reachable(NAVVI_PORT)
             active_persona = persona
             navvi_api = "http://127.0.0.1:{}".format(NAVVI_PORT)
+
+            # Start persona's Firefox instance if not default
+            if persona != "default" and reachable:
+                try:
+                    result = await api_call("POST", "/persona/start", {"name": persona})
+                    touch_persona(persona)
+                    return "Navvi running. Started persona '{}' (port {}).\nAPI: http://127.0.0.1:{}\nVNC: http://127.0.0.1:{}".format(
+                        persona, result.get("port", "?"), NAVVI_PORT, VNC_PORT,
+                    )
+                except Exception:
+                    pass  # Already running or error — fall through to switch
+                try:
+                    await api_call("POST", "/persona/switch", {"name": persona})
+                except Exception:
+                    pass
+
             touch_persona(persona)
             health = "healthy" if reachable else "starting..."
-            return "Navvi running. Switched to persona '{}'.\nAPI: http://127.0.0.1:{} ({})\nVNC: http://127.0.0.1:{}".format(
+            return "Navvi running. Active persona: '{}'.\nAPI: http://127.0.0.1:{} ({})\nVNC: http://127.0.0.1:{}".format(
                 persona, NAVVI_PORT, health, VNC_PORT,
             )
 
