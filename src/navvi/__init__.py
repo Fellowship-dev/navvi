@@ -1109,12 +1109,25 @@ async def navvi_creds(
             entries = result.get("entries", [])
             if not entries:
                 return "No credentials stored in gopass. Use navvi_creds(action='generate') or navvi_creds(action='import') to add entries."
-            output = f"Credentials ({result.get('count', len(entries))} entries):\n"
+            # Filter by persona if specified
+            pname = persona or active_persona or ""
+            if pname:
+                prefix = "navvi/{}/".format(pname)
+                filtered = [e for e in entries if e.startswith(prefix)]
+                if filtered:
+                    output = "Credentials for persona '{}' ({} entries):\n".format(pname, len(filtered))
+                    for e in filtered:
+                        # Show just the service part
+                        service = e.replace(prefix, "")
+                        output += "  {} ({})\n".format(service, e)
+                    return output
+            # No persona filter or no matches — show all
+            output = "All credentials ({} entries):\n".format(len(entries))
             for e in entries:
-                output += f"  {e}\n"
+                output += "  {}\n".format(e)
             return output
         except Exception as e:
-            return f"Error: {e}"
+            return "Error: {}".format(e)
 
     if action == "get":
         if not entry:
