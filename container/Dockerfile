@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libasound2 \
     libx11-xcb1 \
     libdbus-glib-1-2 \
+    openbox \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Camoufox (anti-detect Firefox) — binary fetched to /opt/camoufox

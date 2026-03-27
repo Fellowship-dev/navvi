@@ -3,7 +3,7 @@
 set -e
 
 DISPLAY="${DISPLAY:-:1}"
-SCREEN_SIZE="${SCREEN_SIZE:-1024x768x24}"
+SCREEN_SIZE="${SCREEN_SIZE:-1920x1080x24}"
 NAVVI_PORT="${NAVVI_PORT:-8024}"
 VNC_PORT="${VNC_PORT:-6080}"
 LOCALE="${LOCALE:-en-US}"
@@ -126,11 +126,14 @@ if ! kill -0 "$XVFB_PID" 2>/dev/null; then
   exit 1
 fi
 
+echo "[navvi] Starting window manager..."
+openbox &
+sleep 0.5
+
 echo "[navvi] Starting Camoufox (Marionette on :2828)..."
 camoufox-bin \
   --marionette \
   --no-remote \
-  -width 1024 -height 768 \
   about:blank &
 FIREFOX_PID=$!
 sleep 2
