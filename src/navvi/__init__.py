@@ -64,10 +64,10 @@ from navvi.store import (
 PACKAGE_DIR = os.environ.get("NAVVI_PACKAGE_DIR") or str(Path(__file__).resolve().parent.parent)
 REPO = os.environ.get("NAVVI_REPO") or None
 MACHINE_TYPE = os.environ.get("NAVVI_MACHINE") or "basicLinux32gb"
-NAVVI_PORT = 8024
-VNC_PORT = 6080
+NAVVI_PORT = int(os.environ.get("NAVVI_PORT") or 8024)
+VNC_PORT = int(os.environ.get("NAVVI_VNC_PORT") or 6080)
 DOCKER_IMAGE = os.environ.get("NAVVI_IMAGE") or "ghcr.io/fellowship-dev/navvi:latest"
-CONTAINER_PREFIX = "navvi-"
+CONTAINER_PREFIX = os.environ.get("NAVVI_CONTAINER_PREFIX") or "navvi-"
 
 PIDFILE_FWD = os.path.join(tempfile.gettempdir(), ".navvi-port-forward.pid")
 PIDFILE_RECORD = os.path.join(tempfile.gettempdir(), ".navvi-ffmpeg.pid")
