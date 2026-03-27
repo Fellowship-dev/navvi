@@ -1,6 +1,5 @@
 name: dev
 description: Developer persona for blogging and community
-credentials: $BW_GOOGLE_AYUDA
 services:
   - dev.to
   - github.com

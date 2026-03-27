@@ -154,5 +154,6 @@ python3 /opt/navvi/navvi-server.py \
   --display "$DISPLAY" &
 API_PID=$!
 
-# Wait for any child to exit (keeps the shell alive to handle SIGTERM)
-wait
+# Keep alive — wait on the API server (critical process)
+# If noVNC or x11vnc crash, the container stays up. Only API server death kills it.
+wait $API_PID

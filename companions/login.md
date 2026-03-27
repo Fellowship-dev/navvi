@@ -30,14 +30,16 @@ mcp__navvi__navvi_screenshot()
 ### Step 3: Handle failures
 If `navvi_login` fails or reports issues:
 - **2FA required**: call `navvi_vnc()` and tell the user to complete it manually
-- **CAPTCHA**: call `navvi_vnc()` — do NOT attempt to solve
+- **reCAPTCHA v2**: try clicking the checkbox (`navvi_find(selector="iframe[title*=reCAPTCHA]")` → `navvi_click`) up to 3 times. If an image challenge appears or 3 clicks fail, call `navvi_vnc()` for human help
+- **Other CAPTCHAs** (Arkose/FunCaptcha, hCaptcha): call `navvi_vnc()` — do NOT attempt to solve
 - **Non-standard form**: unlock atomic tools with `navvi_atomic(enable=true)`, then use `navvi_find` + `navvi_fill` for username only. For passwords, use VNC.
 
 ## Rules
 
 - ALWAYS try `navvi_login` first — only fall back to atomic tools if it fails
 - NEVER type or display passwords
-- If you hit a CAPTCHA, escalate to VNC immediately
+- For reCAPTCHA v2, try clicking the checkbox first (up to 3 attempts) before escalating to VNC
+- For other CAPTCHAs (Arkose, hCaptcha, image puzzles), escalate to VNC immediately
 - Always screenshot before and after to verify
 
 ## Response Format

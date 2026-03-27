@@ -180,7 +180,9 @@ def login_flow(service: str, persona: str = "default") -> str:
         f"3. Use navvi_creds action=autofill to fill the login form (password stays in gopass, never exposed)\n"
         f"4. Press Enter or click the submit button\n"
         f"5. Take a screenshot to verify login success\n"
-        f"6. If 2FA is required, call navvi_vnc and ask the user to complete it\n"
+        f"6. If you hit a reCAPTCHA, try clicking the checkbox (iframe[title*=reCAPTCHA]) up to 3 times.\n"
+        f"   If an image challenge appears or 3 attempts fail, call navvi_vnc for human help.\n"
+        f"7. If 2FA is required, call navvi_vnc and ask the user to complete it\n"
     )
 
 
@@ -414,6 +416,57 @@ def check_remote_deps() -> list:
     return missing
 
 
+def detect_environment() -> str:
+    """Detect current environment for credential namespacing.
+
+    Returns 'docker:<image-id>', 'codespace:<name>', or 'local'.
+    """
+    cs_name = os.environ.get("CODESPACE_NAME")
+    if cs_name:
+        return "codespace:{}".format(cs_name)
+    try:
+        image_id = sh("docker inspect navvi-default --format '{{.Image}}' 2>/dev/null")
+        if image_id and image_id.startswith("sha256:"):
+            return "docker:{}".format(image_id[7:19])
+        elif image_id:
+            return "docker:{}".format(image_id[:12])
+    except Exception:
+        pass
+    return "local"
+
+
+def prefix_creds_ref(gopass_path: str) -> str:
+    """Add environment prefix to a gopass path.
+
+    'navvi/fry/hn' -> 'gopass://docker:abc123/navvi/fry/hn'
+    """
+    env = detect_environment()
+    path = gopass_path
+    if path.startswith("gopass://"):
+        path = path[len("gopass://"):]
+    if path.startswith("docker:") or path.startswith("codespace:") or path.startswith("local/"):
+        return "gopass://{}".format(path)
+    return "gopass://{}/{}".format(env, path)
+
+
+def parse_creds_ref(creds_ref: str) -> dict:
+    """Parse a prefixed creds_ref into environment + gopass path.
+
+    'gopass://docker:abc123/navvi/fry/hn' -> {'env': 'docker:abc123', 'path': 'navvi/fry/hn'}
+    'gopass://navvi/fry/hn' -> {'env': '', 'path': 'navvi/fry/hn'}
+    """
+    ref = creds_ref
+    if ref.startswith("gopass://"):
+        ref = ref[len("gopass://"):]
+    if ref.startswith("docker:") or ref.startswith("codespace:"):
+        colon_pos = ref.index(":")
+        slash_pos = ref.index("/", colon_pos)
+        return {"env": ref[:slash_pos], "path": ref[slash_pos + 1:]}
+    if ref.startswith("local/"):
+        return {"env": "local", "path": ref[6:]}
+    return {"env": "", "path": ref}
+
+
 def format_missing(missing: list) -> str:
     msg = "Missing dependencies:\n\n"
     for dep in missing:
@@ -621,9 +674,11 @@ async def navvi_start(
                 try:
                     result = await api_call("POST", "/persona/start", {"name": persona})
                     touch_persona(persona)
-                    return "Navvi running. Started persona '{}' (port {}).\nAPI: http://127.0.0.1:{}\nVNC: http://127.0.0.1:{}".format(
-                        persona, result.get("port", "?"), NAVVI_PORT, VNC_PORT,
-                    )
+                    return (
+                        "Navvi running. Started persona '{}' (port {}).\nAPI: http://127.0.0.1:{}\nVNC: http://127.0.0.1:{}\n\n"
+                        "Available prompts: signup_flow(service), login_flow(service), qa_walk(url)\n"
+                        "Companion agents: navvi-browse, navvi-login, navvi-signup"
+                    ).format(persona, result.get("port", "?"), NAVVI_PORT, VNC_PORT)
                 except Exception:
                     pass  # Already running or error — fall through to switch
                 try:
@@ -633,8 +688,11 @@ async def navvi_start(
 
             touch_persona(persona)
             health = "healthy" if reachable else "starting..."
-            return "Navvi running. Active persona: '{}'.\nAPI: http://127.0.0.1:{} ({})\nVNC: http://127.0.0.1:{}".format(
-                persona, NAVVI_PORT, health, VNC_PORT,
+            return (
+                "Navvi running. Active persona: '{}'.\nAPI: http://127.0.0.1:{} ({})\nVNC: http://127.0.0.1:{}\n\n"
+                "Available prompts: signup_flow(service), login_flow(service), qa_walk(url)\n"
+                "Companion agents: navvi-browse, navvi-login, navvi-signup"
+            ).format(persona, NAVVI_PORT, health, VNC_PORT,
             )
 
         # Remove stopped container with same name
@@ -702,7 +760,9 @@ async def navvi_start(
             "API: http://127.0.0.1:{} ({})\n"
             "VNC: http://127.0.0.1:{}\n"
             "Volumes: navvi-profile, navvi-gpg, navvi-gopass (shared, persistent)\n\n"
-            "Use navvi_browse for browsing, navvi_screenshot to verify."
+            "Use navvi_browse for browsing, navvi_screenshot to verify.\n\n"
+            "Available prompts: signup_flow(service), login_flow(service), qa_walk(url)\n"
+            "Companion agents: navvi-browse (autonomous browsing), navvi-login (login flows), navvi-signup (account creation)"
         ).format(persona, cname, NAVVI_PORT, health, VNC_PORT)
 
     if mode == "remote":
@@ -785,7 +845,11 @@ async def navvi_start(
         else:
             health = "starting..."
 
-        return f"Navvi started (remote). Codespace: {cs_name}\nAPI: localhost:{NAVVI_PORT} ({health})\nVNC: localhost:{VNC_PORT}"
+        return (
+            f"Navvi started (remote). Codespace: {cs_name}\nAPI: localhost:{NAVVI_PORT} ({health})\nVNC: localhost:{VNC_PORT}\n\n"
+            f"Available prompts: signup_flow(service), login_flow(service), qa_walk(url)\n"
+            f"Companion agents: navvi-browse, navvi-login, navvi-signup"
+        )
 
     return 'Invalid mode. Use "local" or "remote".'
 
@@ -1150,14 +1214,15 @@ async def navvi_creds(
             result = await api_call("POST", "/creds/generate", {
                 "entry": entry, "username": username, "length": length,
             }, api_base)
+            prefixed_ref = prefix_creds_ref(entry)
             return (
-                f"Credential stored: gopass://{entry} ({length} chars)\n"
-                f"Username: {username}\n\n"
-                f"Password was generated inside the container and NEVER appeared in this response.\n"
-                f"Use navvi_creds(action='autofill', entry='{entry}') to fill it into a form."
-            )
+                "Credential stored: {} ({} chars)\n"
+                "Username: {}\n\n"
+                "Password was generated inside the container and NEVER appeared in this response.\n"
+                "Use navvi_creds(action='autofill', entry='{}') to fill it into a form."
+            ).format(prefixed_ref, length, username, entry)
         except Exception as e:
-            return f"Error: {e}"
+            return "Error: {}".format(e)
 
     if action == "import":
         if not file_path:
@@ -1195,9 +1260,15 @@ async def navvi_creds(
     if action == "autofill":
         if not entry:
             return 'Error: "entry" is required for autofill action.'
+        # Parse environment prefix — strip it for the gopass path
+        parsed = parse_creds_ref(entry)
+        gopass_entry = parsed["path"]
+        creds_env = parsed["env"]
+        if creds_env and not creds_env.startswith("docker:") and creds_env != "local" and creds_env != "":
+            return "Error: autofill for environment '{}' is not supported from this container. Credential lives in a different environment.".format(creds_env)
         log_action("autofill", entry)
         try:
-            params = {"entry": entry}
+            params = {"entry": gopass_entry}
             if username_selector:
                 params["username_selector"] = username_selector
             if password_selector:
@@ -1833,9 +1904,10 @@ async def navvi_login(service: str, persona: str = "default") -> str:
             break
 
     if not account:
-        return "No account found for '{}' on persona '{}'. Use navvi_account to add one first.".format(
-            service, pname,
-        )
+        return (
+            "No account found for '{}' on persona '{}'. Use navvi_account to add one first.\n\n"
+            "To create a new account, use the signup_flow prompt or spawn the navvi-signup companion agent."
+        ).format(service, pname)
 
     if not account.get("creds_ref"):
         return "Account for '{}' has no credential reference. Update it with navvi_account.".format(service)
@@ -1875,7 +1947,7 @@ async def navvi_login(service: str, persona: str = "default") -> str:
         return (
             "Autofill failed: {}. "
             "The login page may have a non-standard layout. "
-            "Use navvi_browse or atomic tools instead."
+            "Try spawning the navvi-login companion agent, or use navvi_browse / atomic tools."
         ).format(e)
 
     return "Autofill returned no confirmation. Check the page with navvi_screenshot."
