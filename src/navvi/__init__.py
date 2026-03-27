@@ -62,7 +62,7 @@ from navvi.store import (
 # --- Constants ---
 
 PACKAGE_DIR = os.environ.get("NAVVI_PACKAGE_DIR") or str(Path(__file__).resolve().parent.parent)
-REPO = os.environ.get("NAVVI_REPO") or None
+REPO = os.environ.get("NAVVI_REPO") or "fellowship-dev/navvi"
 MACHINE_TYPE = os.environ.get("NAVVI_MACHINE") or "basicLinux32gb"
 NAVVI_PORT = int(os.environ.get("NAVVI_PORT") or 8024)
 VNC_PORT = int(os.environ.get("NAVVI_VNC_PORT") or 6080)
@@ -768,8 +768,6 @@ async def navvi_start(
         ).format(persona, cname, NAVVI_PORT, health, VNC_PORT)
 
     if mode == "remote":
-        if not REPO:
-            return 'Error: remote mode requires NAVVI_REPO env var (e.g. "fellowship-dev/navvi"). Set it in your MCP config.'
         missing = check_remote_deps()
         if missing:
             return format_missing(missing)
