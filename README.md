@@ -54,7 +54,7 @@ Navvi gives your agent a persistent browser with its own identity. A [Camoufox](
 ```bash
 git clone https://github.com/Fellowship-dev/navvi.git
 cd navvi
-docker build -t navvi:camoufox -f container/Dockerfile container/
+docker build -t navvi -f container/Dockerfile container/
 ```
 
 ### 2. Add to Claude Code
