@@ -430,7 +430,7 @@ async def navigate(req: NavigateRequest):
         m = get_marionette()
         m.navigate(req.url)
         # Give the page a moment to start loading
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.5)
         url = m.get_url()
         title = m.get_title()
         return {"ok": True, "url": url, "title": title}
@@ -461,7 +461,7 @@ async def get_title():
 @app.post("/click")
 async def click(req: ClickRequest):
     """Click at (x, y) using xdotool."""
-    run_xdotool(f"mousemove --sync {req.x} {req.y}")
+    run_xdotool(f"mousemove {req.x} {req.y}")
     await asyncio.sleep(0.05)
     run_xdotool("click 1")
     return {"ok": True, "x": req.x, "y": req.y}
@@ -491,7 +491,7 @@ async def press_key(req: KeyRequest):
 @app.post("/mousedown")
 async def mousedown(req: MouseRequest):
     """Move to (x, y) and press mouse button down."""
-    run_xdotool(f"mousemove --sync {req.x} {req.y}")
+    run_xdotool(f"mousemove {req.x} {req.y}")
     await asyncio.sleep(0.05)
     run_xdotool("mousedown 1")
     return {"ok": True, "x": req.x, "y": req.y}
@@ -500,16 +500,32 @@ async def mousedown(req: MouseRequest):
 @app.post("/mouseup")
 async def mouseup(req: MouseRequest):
     """Move to (x, y) and release mouse button."""
-    run_xdotool(f"mousemove --sync {req.x} {req.y}")
+    run_xdotool(f"mousemove {req.x} {req.y}")
     await asyncio.sleep(0.05)
     run_xdotool("mouseup 1")
     return {"ok": True, "x": req.x, "y": req.y}
 
 
+class HoldRequest(BaseModel):
+    x: int
+    y: int
+    duration_ms: int = 5000
+
+@app.post("/hold")
+async def hold(req: HoldRequest):
+    """Press and hold at (x, y) for duration_ms milliseconds. For CAPTCHAs."""
+    run_xdotool(f"mousemove {req.x} {req.y}")
+    await asyncio.sleep(0.05)
+    run_xdotool("mousedown 1")
+    await asyncio.sleep(req.duration_ms / 1000.0)
+    run_xdotool("mouseup 1")
+    return {"ok": True, "x": req.x, "y": req.y, "duration_ms": req.duration_ms}
+
+
 @app.post("/mousemove")
 async def mousemove(req: MouseRequest):
     """Move mouse to (x, y)."""
-    run_xdotool(f"mousemove --sync {req.x} {req.y}")
+    run_xdotool(f"mousemove {req.x} {req.y}")
     return {"ok": True, "x": req.x, "y": req.y}
 
 
@@ -520,7 +536,7 @@ async def drag(req: DragRequest):
     step_delay = req.duration / steps
 
     # Move to start and press
-    run_xdotool(f"mousemove --sync {req.x1} {req.y1}")
+    run_xdotool(f"mousemove {req.x1} {req.y1}")
     await asyncio.sleep(0.05)
     run_xdotool("mousedown 1")
     await asyncio.sleep(0.05)
@@ -530,7 +546,7 @@ async def drag(req: DragRequest):
         t = i / steps
         cx = int(req.x1 + (req.x2 - req.x1) * t)
         cy = int(req.y1 + (req.y2 - req.y1) * t)
-        run_xdotool(f"mousemove --sync {cx} {cy}")
+        run_xdotool(f"mousemove {cx} {cy}")
         await asyncio.sleep(step_delay)
 
     # Release
@@ -792,8 +808,8 @@ async def creds_autofill(req: CredsAutofillRequest):
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=f"gopass error: {e}")
 
-    if not username or not password:
-        raise HTTPException(status_code=404, detail=f"Entry '{req.entry}' missing username/email or password")
+    if not password:
+        raise HTTPException(status_code=404, detail=f"Entry '{req.entry}' has no password")
 
     # Find form fields
     try:
@@ -810,34 +826,42 @@ async def creds_autofill(req: CredsAutofillRequest):
                 visible: r.width > 0 && r.height > 0,
             };
         """
-        username_el = m.execute_script(find_script, [req.username_selector])
-        password_el = m.execute_script(find_script, [req.password_selector])
 
-        if not username_el or not username_el.get("visible"):
-            raise HTTPException(status_code=404, detail=f"Username field not found: {req.username_selector}")
+        # Find username field (optional — may not exist on password-only pages)
+        username_el = None
+        if username:
+            username_el = m.execute_script(find_script, [req.username_selector])
+            if username_el and not username_el.get("visible"):
+                username_el = None
+
+        # Find password field
+        password_el = m.execute_script(find_script, [req.password_selector])
         if not password_el or not password_el.get("visible"):
             raise HTTPException(status_code=404, detail=f"Password field not found: {req.password_selector}")
 
-        # Apply viewport offset
-        ux, uy = username_el["x"] + offset_x, username_el["y"] + offset_y
         px, py = password_el["x"] + offset_x, password_el["y"] + offset_y
     except MarionetteError as e:
         raise HTTPException(status_code=500, detail=f"Browser error: {e}")
 
-    # Fill username
-    run_xdotool(f"mousemove --sync {ux} {uy}")
-    await asyncio.sleep(0.05)
-    run_xdotool("click 1")
-    await asyncio.sleep(0.1)
-    run_xdotool("key ctrl+a")
-    await asyncio.sleep(0.05)
-    safe_user = shlex.quote(username)
-    run_xdotool(f"type --delay 15 -- {safe_user}", timeout=15.0)
+    username_filled = False
+    ux, uy = 0, 0
 
-    await asyncio.sleep(0.3)
+    # Fill username (if field found and username available)
+    if username_el and username:
+        ux, uy = username_el["x"] + offset_x, username_el["y"] + offset_y
+        run_xdotool(f"mousemove {ux} {uy}")
+        await asyncio.sleep(0.05)
+        run_xdotool("click 1")
+        await asyncio.sleep(0.1)
+        run_xdotool("key ctrl+a")
+        await asyncio.sleep(0.05)
+        safe_user = shlex.quote(username)
+        run_xdotool(f"type --delay 15 -- {safe_user}", timeout=15.0)
+        await asyncio.sleep(0.3)
+        username_filled = True
 
     # Fill password (never logged, never returned)
-    run_xdotool(f"mousemove --sync {px} {py}")
+    run_xdotool(f"mousemove {px} {py}")
     await asyncio.sleep(0.05)
     run_xdotool("click 1")
     await asyncio.sleep(0.1)
@@ -853,9 +877,9 @@ async def creds_autofill(req: CredsAutofillRequest):
     return {
         "ok": True,
         "entry": req.entry,
-        "username_filled": True,
+        "username_filled": username_filled,
         "password_filled": True,
-        "username_at": [ux, uy],
+        "username_at": [ux, uy] if username_filled else [],
         "password_at": [px, py],
         "note": "Password was typed directly into the browser — it never appeared in this response."
     }

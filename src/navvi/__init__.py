@@ -85,7 +85,7 @@ active_persona: Optional[str] = None
 
 mcp = FastMCP(
     "navvi",
-    version="3.10.0",
+    version="3.11.0",
 )
 
 # Ensure default persona exists on startup
@@ -1008,8 +1008,20 @@ async def navvi_drag(
 
 
 @mcp.tool(tags={"atomic"})
+async def navvi_hold(x: int, y: int, duration_ms: int = 5000, persona: str = "") -> str:
+    """Press and hold at (x, y) for duration_ms milliseconds. Use for press-and-hold CAPTCHAs. Get coordinates from navvi_find."""
+    _, api_base = resolve_persona(persona or None)
+    log_action("hold", "({}, {}) {}ms".format(x, y, duration_ms))
+    try:
+        await api_call("POST", "/hold", {"x": x, "y": y, "duration_ms": duration_ms}, api_base)
+        return "Held at ({}, {}) for {}ms".format(x, y, duration_ms)
+    except Exception as e:
+        return "Error: {}".format(e)
+
+
+@mcp.tool(tags={"atomic"})
 async def navvi_mousedown(x: int, y: int, persona: str = "") -> str:
-    """Press and hold mouse button at (x, y). Pair with navvi_mouseup for press-and-hold CAPTCHAs. Get coordinates from navvi_find. WARNING: Arkose Labs/FunCaptcha (Microsoft, Yahoo) cannot be solved inside the container even by a human -- the virtual display is fingerprinted. If you detect arkoselabs/funcaptcha in the page, stop and tell the user to use a real browser for that signup."""
+    """Press mouse button at (x, y). Pair with navvi_mouseup for manual hold control. For simple press-and-hold, use navvi_hold instead."""
     _, api_base = resolve_persona(persona or None)
     log_action("mousedown", f"({x}, {y})")
     try:
@@ -1803,11 +1815,12 @@ navvi_fill(x, y, value, delay?, persona?) — Click field + type text
 navvi_press(key, persona?) — Press key: Enter, Tab, Escape, Backspace, ArrowDown...
 navvi_scroll(direction?, amount?, persona?) — Scroll up/down/left/right
 navvi_drag(x1, y1, x2, y2, steps?, duration?, persona?) — Drag between points
-navvi_mousedown(x, y, persona?) — Press and hold (for CAPTCHAs)
+navvi_hold(x, y, duration_ms?, persona?) — Press and hold at (x,y) for duration (default 5s). For CAPTCHAs.
+navvi_mousedown(x, y, persona?) — Press mouse button (pair with mouseup)
 navvi_mouseup(x, y, persona?) — Release mouse button
 navvi_mousemove(x, y, persona?) — Move without clicking
 navvi_url(persona?) — Get current page URL
-navvi_creds(action, entry?, field?, persona?) — Gopass credentials: list, get metadata, or autofill login form
+navvi_creds(action, entry?, field?, persona?) — Gopass credentials: list, get, generate, import, autofill
 
 Workflow: navvi_find(selector) → get (x, y) → navvi_click/navvi_fill at those coords → navvi_screenshot to verify."""
     else:
