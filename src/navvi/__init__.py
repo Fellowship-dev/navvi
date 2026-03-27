@@ -66,7 +66,7 @@ REPO = os.environ.get("NAVVI_REPO") or None
 MACHINE_TYPE = os.environ.get("NAVVI_MACHINE") or "basicLinux32gb"
 NAVVI_PORT = 8024
 VNC_PORT = 6080
-DOCKER_IMAGE = os.environ.get("NAVVI_IMAGE") or "navvi"
+DOCKER_IMAGE = os.environ.get("NAVVI_IMAGE") or "ghcr.io/fellowship-dev/navvi:latest"
 CONTAINER_PREFIX = "navvi-"
 
 PIDFILE_FWD = os.path.join(tempfile.gettempdir(), ".navvi-port-forward.pid")

@@ -49,15 +49,7 @@ Navvi gives your agent a persistent browser with its own identity. A [Camoufox](
 
 ## Quick Start
 
-### 1. Build the Docker image
-
-```bash
-git clone https://github.com/Fellowship-dev/navvi.git
-cd navvi
-docker build -t navvi -f container/Dockerfile container/
-```
-
-### 2. Add to Claude Code
+### 1. Add to Claude Code
 
 Add to your project's `.mcp.json`:
 
@@ -260,6 +252,24 @@ Persona config and state live in `~/.navvi/navvi.db`. Browser profiles and crede
 - **NAVVI_GPG_PASSPHRASE** &mdash; any random string, enables the gopass credential vault. Set in `.mcp.json` env.
 - **ffmpeg** (optional) &mdash; only needed for video recording
 - **ANTHROPIC_API_KEY** (optional) &mdash; enables Haiku vision for `navvi_browse` ($0.002/step). Without it, falls back to `claude -p` CLI or heuristics. For best results, install the [companion agents](#4-optional-install-companion-agents) instead &mdash; they use Claude Code's native vision at no extra cost.
+
+## Contributing
+
+```bash
+git clone https://github.com/Fellowship-dev/navvi.git
+cd navvi
+
+# Build the container image locally
+docker build -t navvi -f container/Dockerfile container/
+
+# Install the MCP server in editable mode
+pip install -e .
+
+# Run the MCP server (points to local image)
+NAVVI_IMAGE=navvi python -m navvi
+```
+
+Set `NAVVI_IMAGE=navvi` in your `.mcp.json` env to use the locally built image instead of GHCR.
 
 ## License
 
