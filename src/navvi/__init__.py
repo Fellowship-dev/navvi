@@ -91,10 +91,10 @@ mcp = FastMCP(
 # Ensure default persona exists on startup
 ensure_default()
 
-# Progressive disclosure: hide atomic tools by default.
-# Journey tools (navvi_browse, navvi_login) handle most interactions.
-# Atomic tools (navvi_click, navvi_find, etc.) are available on demand.
-mcp.disable(tags={"atomic", "recording"})
+# Recording tools hidden by default (rarely needed).
+# Atomic tools are always visible — Claude Code doesn't support dynamic
+# tool registration mid-session, so hide/reveal via navvi_atomic is broken.
+mcp.disable(tags={"recording"})
 
 
 # --- MCP Resources ---
@@ -1786,27 +1786,13 @@ async def _execute_action(action: dict, api_base: str, dom_elements: list):
 
 @mcp.tool()
 async def navvi_atomic(enable: bool = True, ctx: Context = None) -> str:
-    """Enable or disable atomic browser tools (navvi_click, navvi_find, navvi_fill, etc.).
+    """Quick reference for atomic browser tools (navvi_click, navvi_find, navvi_fill, etc.).
 
-    Atomic tools are hidden by default — use navvi_browse for most tasks.
-    Enable atomic tools only when navvi_browse asks for guidance or you need fine-grained control.
+    Atomic tools are always available. Call this for a summary of tools and workflow.
 
-    Example: navvi_atomic(enable=true) → reveals 12 low-level tools
+    Example: navvi_atomic() → lists all atomic tools with parameters
     """
-    if ctx:
-        # Session-level: sends notifications/tools/list_changed → CC re-fetches tool list
-        if enable:
-            await ctx.enable_components(tags={"atomic"})
-        else:
-            await ctx.disable_components(tags={"atomic"})
-    else:
-        # Fallback to global (no notification)
-        if enable:
-            mcp.enable(tags={"atomic"})
-        else:
-            mcp.disable(tags={"atomic"})
-    if enable:
-        return """Atomic tools enabled. You can now call these directly:
+    return """Atomic tools available — call these directly:
 
 navvi_open(url, persona?) — Navigate to a URL
 navvi_find(selector, all?, persona?) — Find element by CSS selector → screen-ready (x, y). THE way to get coordinates.
@@ -1823,8 +1809,6 @@ navvi_url(persona?) — Get current page URL
 navvi_creds(action, entry?, field?, persona?) — Gopass credentials: list, get, generate, import, autofill
 
 Workflow: navvi_find(selector) → get (x, y) → navvi_click/navvi_fill at those coords → navvi_screenshot to verify."""
-    else:
-        return "Atomic tools hidden. Use navvi_browse for browser interactions."
 
 
 # --- Journey Tools ---
