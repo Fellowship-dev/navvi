@@ -1794,9 +1794,24 @@ async def navvi_atomic(enable: bool = True, ctx: Context = None) -> str:
         else:
             mcp.disable(tags={"atomic"})
     if enable:
-        return "Atomic tools enabled: navvi_open, navvi_find, navvi_click, navvi_fill, navvi_press, navvi_scroll, navvi_drag, navvi_mousedown, navvi_mouseup, navvi_mousemove, navvi_url, navvi_creds. Tool list refreshed."
+        return """Atomic tools enabled. You can now call these directly:
+
+navvi_open(url, persona?) — Navigate to a URL
+navvi_find(selector, all?, persona?) — Find element by CSS selector → screen-ready (x, y). THE way to get coordinates.
+navvi_click(x, y, persona?) — Click at screen coordinates (from navvi_find)
+navvi_fill(x, y, value, delay?, persona?) — Click field + type text
+navvi_press(key, persona?) — Press key: Enter, Tab, Escape, Backspace, ArrowDown...
+navvi_scroll(direction?, amount?, persona?) — Scroll up/down/left/right
+navvi_drag(x1, y1, x2, y2, steps?, duration?, persona?) — Drag between points
+navvi_mousedown(x, y, persona?) — Press and hold (for CAPTCHAs)
+navvi_mouseup(x, y, persona?) — Release mouse button
+navvi_mousemove(x, y, persona?) — Move without clicking
+navvi_url(persona?) — Get current page URL
+navvi_creds(action, entry?, field?, persona?) — Gopass credentials: list, get metadata, or autofill login form
+
+Workflow: navvi_find(selector) → get (x, y) → navvi_click/navvi_fill at those coords → navvi_screenshot to verify."""
     else:
-        return "Atomic tools hidden. Use navvi_browse for browser interactions. Tool list refreshed."
+        return "Atomic tools hidden. Use navvi_browse for browser interactions."
 
 
 # --- Journey Tools ---
