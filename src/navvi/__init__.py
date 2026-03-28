@@ -266,18 +266,8 @@ def which(binary: str) -> Optional[str]:
 
 
 def gh_sh(cmd: str) -> str:
-    """Run a gh CLI command with CODESPACE_TOKEN as GH_TOKEN."""
-    token = os.environ.get("CODESPACE_TOKEN")
-    if not token:
-        return sh(cmd)
-    try:
-        env = {**os.environ, "GH_TOKEN": token}
-        result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=60, env=env
-        )
-        return result.stdout.strip() if result.returncode == 0 else (result.stderr.strip() or result.stdout.strip())
-    except Exception as e:
-        return str(e)
+    """Run a gh CLI command. GH_TOKEN env var is passed through natively by gh CLI."""
+    return sh(cmd)
 
 
 def kill_pidfile(pidfile: str):
@@ -915,8 +905,7 @@ async def navvi_start(
         if missing:
             return format_missing(missing)
 
-        cs_token = os.environ.get("CODESPACE_TOKEN")
-        gh_env = {**os.environ, "GH_TOKEN": cs_token} if cs_token else dict(os.environ)
+        gh_env = dict(os.environ)
 
         cs_name = name or ""
         if cs_name:
@@ -947,7 +936,7 @@ async def navvi_start(
                 )
 
         if not cs_name:
-            return "Failed to start Codespace. Check gh auth status and CODESPACE_TOKEN env var."
+            return "Failed to start Codespace. Check gh auth status and GH_TOKEN env var."
 
         # Wait for navvi-server inside codespace
         api_ready = False

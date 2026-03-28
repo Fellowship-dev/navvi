@@ -1,5 +1,0 @@
-name: default
-description: Default browser persona
-browser:
-  locale: en-US
-  timezone: UTC
