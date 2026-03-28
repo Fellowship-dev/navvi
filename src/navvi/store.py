@@ -372,7 +372,8 @@ def generate_brief(persona: str) -> str:
             lines.append(f"- **{a['service']}**: {a['email']}{status}{notes}")
         lines.append("")
         # Extract primary email
-        email_accounts = [a for a in accounts if a['service'] in ('outlook.com', 'gmail', 'tutanota', 'protonmail') and a['status'] == 'active']
+        email_services = ('outlook', 'outlook.com', 'gmail', 'tutanota', 'protonmail', 'hotmail')
+        email_accounts = [a for a in accounts if a['service'].lower() in email_services and a['status'] == 'active']
         if email_accounts:
             primary = email_accounts[0]
             lines.append(f"**⚡ My primary email: `{primary['email']}`** — use this when signing up for new services.")

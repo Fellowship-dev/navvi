@@ -91,7 +91,7 @@ active_persona: Optional[str] = None
 
 mcp = FastMCP(
     "navvi",
-    version="3.14.0",
+    version="3.14.1",
 )
 
 # Ensure default persona exists on startup
