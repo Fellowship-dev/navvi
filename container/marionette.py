@@ -161,6 +161,30 @@ class Marionette:
         })
         return result.get("value") if isinstance(result, dict) else result
 
+    def get_window_handle(self):
+        """Get the handle of the current window/tab."""
+        result = self._command("WebDriver:GetWindowHandle")
+        return result.get("value", "") if isinstance(result, dict) else str(result)
+
+    def get_window_handles(self):
+        """Get handles for all open windows/tabs."""
+        result = self._command("WebDriver:GetWindowHandles")
+        return result if isinstance(result, list) else result.get("value", []) if isinstance(result, dict) else []
+
+    def new_window(self, type_hint="tab"):
+        """Open a new window or tab. Returns {"handle": "...", "type": "tab"}."""
+        result = self._command("WebDriver:NewWindow", {"type": type_hint})
+        return result if isinstance(result, dict) else {}
+
+    def switch_to_window(self, handle):
+        """Switch to a window/tab by handle."""
+        return self._command("WebDriver:SwitchToWindow", {"handle": handle})
+
+    def close_window(self):
+        """Close the current window/tab. Returns list of remaining handles."""
+        result = self._command("WebDriver:CloseWindow")
+        return result if isinstance(result, list) else result.get("value", []) if isinstance(result, dict) else []
+
     def execute_async_script(self, script, args=None, timeout_ms=30000):
         """Execute async JavaScript (with callback)."""
         # Set script timeout first

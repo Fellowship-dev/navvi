@@ -209,6 +209,10 @@ class FindRequest(BaseModel):
     selector: str
     all: bool = False  # return all matches vs just the first
 
+class TabNewRequest(BaseModel):
+    url: str = ""
+
+
 class CredsAutofillRequest(BaseModel):
     entry: str  # gopass entry path, e.g. "navvi/default/tuta"
     username_selector: str = "input[type=email], input[type=text], input[name*=user i], input[name*=email i], input[name*=login i]"
@@ -641,6 +645,84 @@ async def find_element(req: FindRequest):
             el["x"] = el.pop("vx") + offset_x
             el["y"] = el.pop("vy") + offset_y
             return {"ok": True, "found": True, **el}
+    except MarionetteError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- Tab management ---
+
+@app.get("/tab/list")
+async def tab_list():
+    """List all tabs with handle, url, and title."""
+    try:
+        m = get_marionette()
+        original_handle = m.get_window_handle()
+        handles = m.get_window_handles()
+        tabs = []
+        for h in handles:
+            m.switch_to_window(h)
+            tabs.append({
+                "handle": h,
+                "url": m.get_url(),
+                "title": m.get_title(),
+            })
+        # Switch back to original tab
+        m.switch_to_window(original_handle)
+        return {"ok": True, "tabs": tabs, "count": len(tabs), "active": original_handle}
+    except MarionetteError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/tab/new")
+async def tab_new(req: TabNewRequest):
+    """Open a new tab, optionally navigate to a URL. Switches to the new tab."""
+    try:
+        m = get_marionette()
+        result = m.new_window("tab")
+        handle = result.get("handle", "")
+        m.switch_to_window(handle)
+        if req.url:
+            m.navigate(req.url)
+            await asyncio.sleep(0.5)
+        url = m.get_url()
+        title = m.get_title()
+        return {"ok": True, "handle": handle, "url": url, "title": title}
+    except MarionetteError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/tab/switch/{handle}")
+async def tab_switch(handle: str):
+    """Switch to a tab by handle. Returns url and title of the switched-to tab."""
+    try:
+        m = get_marionette()
+        m.switch_to_window(handle)
+        url = m.get_url()
+        title = m.get_title()
+        return {"ok": True, "handle": handle, "url": url, "title": title}
+    except MarionetteError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/tab/close/{handle}")
+async def tab_close(handle: str):
+    """Close a tab by handle. Cannot close the last tab."""
+    try:
+        m = get_marionette()
+        handles = m.get_window_handles()
+        if len(handles) <= 1:
+            raise HTTPException(status_code=400, detail="Cannot close the last tab")
+        m.switch_to_window(handle)
+        remaining = m.close_window()
+        # Switch to first remaining tab
+        if remaining:
+            m.switch_to_window(remaining[0])
+            url = m.get_url()
+            title = m.get_title()
+            return {"ok": True, "closed": handle, "active": remaining[0], "url": url, "title": title, "remaining": len(remaining)}
+        return {"ok": True, "closed": handle, "remaining": 0}
+    except HTTPException:
+        raise
     except MarionetteError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
