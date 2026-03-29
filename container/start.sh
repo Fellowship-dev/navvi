@@ -19,15 +19,15 @@ PERSIST_DIR="/workspaces/.codespaces/.persistedshare/navvi"
 if [ -d "/workspaces/.codespaces/.persistedshare" ]; then
   mkdir -p "$PERSIST_DIR"
 
-  # Browser profile
-  if [ -d "$PERSIST_DIR/mozilla" ] && [ ! -L "$HOME/.mozilla" ]; then
-    rm -rf "$HOME/.mozilla"
-    ln -s "$PERSIST_DIR/mozilla" "$HOME/.mozilla"
+  # Browser profile (Camoufox uses .camoufox, not .mozilla)
+  if [ -d "$PERSIST_DIR/camoufox" ] && [ ! -L "$HOME/.camoufox" ]; then
+    rm -rf "$HOME/.camoufox"
+    ln -s "$PERSIST_DIR/camoufox" "$HOME/.camoufox"
     echo "[navvi] Browser profile linked to persistent storage"
-  elif [ -d "$HOME/.mozilla" ] && [ ! -L "$HOME/.mozilla" ]; then
-    cp -a "$HOME/.mozilla" "$PERSIST_DIR/mozilla"
-    rm -rf "$HOME/.mozilla"
-    ln -s "$PERSIST_DIR/mozilla" "$HOME/.mozilla"
+  elif [ -d "$HOME/.camoufox" ] && [ ! -L "$HOME/.camoufox" ]; then
+    cp -a "$HOME/.camoufox" "$PERSIST_DIR/camoufox"
+    rm -rf "$HOME/.camoufox"
+    ln -s "$PERSIST_DIR/camoufox" "$HOME/.camoufox"
     echo "[navvi] Browser profile moved to persistent storage"
   fi
 

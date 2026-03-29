@@ -861,7 +861,7 @@ async def navvi_start(
             "--name", cname,
             "-p", "{}:8024".format(api_port),
             "-p", "{}:6080".format(vnc_port),
-            "-v", "navvi-profile-{}:/home/user/.mozilla".format(persona),
+            "-v", "navvi-profile-{}:/home/user/.camoufox".format(persona),
             "-v", "navvi-gpg:/home/user/.gnupg",
             "-v", "navvi-gopass:/home/user/.local/share/gopass",
             "-e", "LOCALE={}".format(locale),
