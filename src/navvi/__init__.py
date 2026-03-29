@@ -16,6 +16,9 @@ Element discovery:
 Credentials:
   navvi_creds
 
+Tab management:
+  navvi_tab
+
 Video recording:
   navvi_record_start, navvi_record_stop, navvi_record_gif
 
@@ -1491,6 +1494,78 @@ async def navvi_creds(
             return f"Error: {e}"
 
     return 'Error: action must be "list", "get", "generate", "import", or "autofill".'
+
+
+@mcp.tool(tags={"atomic"})
+async def navvi_tab(
+    action: str,
+    handle: str = "",
+    url: str = "",
+    persona: str = "",
+) -> str:
+    """Manage browser tabs within a persona. Four actions:
+
+    - "list": list all open tabs with handle, url, and title
+    - "new": open a new tab (optionally navigate to url). Switches to the new tab.
+    - "switch": switch to a tab by handle
+    - "close": close a tab by handle (cannot close the last tab)
+    """
+    _, api_base = resolve_persona(persona or None)
+
+    if action == "list":
+        try:
+            result = await api_call("GET", "/tab/list", api_base=api_base)
+            tabs = result.get("tabs", [])
+            active = result.get("active", "")
+            if not tabs:
+                return "No tabs found."
+            output = "Open tabs ({}):\n".format(len(tabs))
+            for t in tabs:
+                marker = " (active)" if t["handle"] == active else ""
+                output += "  [{}]{} {} — {}\n".format(t["handle"], marker, t["title"], t["url"])
+            return output
+        except Exception as e:
+            return "Error: {}".format(e)
+
+    if action == "new":
+        log_action("tab_new", url or "blank")
+        try:
+            body = {"url": url} if url else {}
+            result = await api_call("POST", "/tab/new", body, api_base)
+            return "New tab opened: [{}] {} — {}".format(
+                result.get("handle", ""), result.get("title", ""), result.get("url", "")
+            )
+        except Exception as e:
+            return "Error: {}".format(e)
+
+    if action == "switch":
+        if not handle:
+            return 'Error: "handle" is required for switch action.'
+        try:
+            result = await api_call("POST", "/tab/switch/{}".format(handle), api_base=api_base)
+            return "Switched to tab [{}]: {} — {}".format(
+                handle, result.get("title", ""), result.get("url", "")
+            )
+        except Exception as e:
+            return "Error: {}".format(e)
+
+    if action == "close":
+        if not handle:
+            return 'Error: "handle" is required for close action.'
+        log_action("tab_close", handle)
+        try:
+            result = await api_call("POST", "/tab/close/{}".format(handle), api_base=api_base)
+            return "Closed tab [{}]. Active tab: [{}] {} — {} ({} remaining)".format(
+                handle,
+                result.get("active", ""),
+                result.get("title", ""),
+                result.get("url", ""),
+                result.get("remaining", 0),
+            )
+        except Exception as e:
+            return "Error: {}".format(e)
+
+    return 'Error: action must be "list", "new", "switch", or "close".'
 
 
 @mcp.tool(tags={"recording"})
