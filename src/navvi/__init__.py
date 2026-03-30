@@ -1207,15 +1207,22 @@ async def navvi_click(x: int, y: int, persona: str = "") -> str:
 
 @mcp.tool(tags={"atomic"})
 async def navvi_fill(x: int, y: int, value: str, delay: int = 12, persona: str = "") -> str:
-    """Click at (x, y) to focus an input field, then type text using OS-level xdotool. Get coordinates from navvi_find first. Selects existing text (Ctrl+A) before typing to replace any current value."""
+    """Click at (x, y) to focus an input field, then type text using OS-level xdotool. Selects existing text before typing to replace any current value.
+
+    Uses triple-click to select all text in the field (works in all input contexts),
+    then types the new value which replaces the selection."""
     pname, api_base = resolve_persona(persona or None)
     fill_duration_ms = len(value) * delay
     log_action("fill", {"x": x, "y": y, "text": value, "durationMs": fill_duration_ms})
     try:
-        # Click to focus
+        # Click to focus the field
         await api_call("POST", "/click", {"x": x, "y": y}, api_base)
         await asyncio.sleep(0.1)
-        # Type
+        # Select all text in the field using Home + Shift+End (field-scoped, unlike Ctrl+A)
+        await api_call("POST", "/key", {"key": "Home"}, api_base)
+        await api_call("POST", "/key", {"key": "shift+End"}, api_base)
+        await asyncio.sleep(0.05)
+        # Type — replaces the selected text
         await api_call("POST", "/type", {"text": value, "delay": delay}, api_base)
         log_persona_action(pname, "fill", f"({x},{y}) {len(value)} chars")
         return f'Filled at ({x}, {y}) with "{value}" ({len(value)} chars)'
