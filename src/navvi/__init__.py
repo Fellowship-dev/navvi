@@ -522,7 +522,33 @@ def list_containers() -> list:
 def check_local_deps() -> list:
     missing = []
     if not which("docker"):
-        missing.append({"name": "Docker", "install": ["brew install --cask docker"]})
+        missing.append({
+            "name": "Docker not found",
+            "install": ["brew install --cask docker  # macOS"],
+            "link": "https://docs.docker.com/get-docker/",
+        })
+        return missing
+    # Docker binary exists — check if the daemon is actually running
+    try:
+        result = subprocess.run(
+            ["docker", "info"], capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            missing.append({
+                "name": "Docker daemon not running",
+                "install": [
+                    "open -a Docker                      # macOS: open Docker Desktop",
+                    "sudo systemctl start docker         # Linux",
+                ],
+            })
+    except Exception:
+        missing.append({
+            "name": "Docker daemon not running",
+            "install": [
+                "open -a Docker                      # macOS: open Docker Desktop",
+                "sudo systemctl start docker         # Linux",
+            ],
+        })
     return missing
 
 
@@ -593,11 +619,13 @@ def parse_creds_ref(creds_ref: str) -> dict:
 def format_missing(missing: list) -> str:
     msg = "Missing dependencies:\n\n"
     for dep in missing:
-        msg += f"{dep['name']} — install with:\n"
+        msg += f"{dep['name']} — fix with:\n"
         for cmd in dep["install"]:
             msg += f"  $ {cmd}\n"
+        if dep.get("link"):
+            msg += f"  Docs: {dep['link']}\n"
         msg += "\n"
-    msg += "Install the missing dependencies and try again."
+    msg += "Resolve the above and try again."
     return msg
 
 
