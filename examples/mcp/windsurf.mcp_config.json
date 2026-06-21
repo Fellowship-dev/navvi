@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "navvi": {
+      "command": "uvx",
+      "args": ["navvi@latest"],
+      "env": {
+        "NAVVI_GPG_PASSPHRASE": "pick-any-random-string-here"
+      }
+    }
+  }
+}
